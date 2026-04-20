@@ -1,0 +1,7 @@
+module xbible_engineFFI {
+    header "xbible_engineFFI.h"
+    export *
+    use "Darwin"
+    use "_Builtin_stdbool"
+    use "_Builtin_stdint"
+}

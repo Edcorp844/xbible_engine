@@ -1,2 +1,9 @@
 /target
 /bindings
+.DS_Store
+/macos
+/ios
+/android
+/linux
+/windows
+/XbibleEngine

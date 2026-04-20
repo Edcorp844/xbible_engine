@@ -27,6 +27,8 @@ pub struct SwordEngine {
 }
 
 impl SwordEngine {
+
+    
     pub fn new() -> Arc<Self> {
         let path = Self::get_sword_path();
 
