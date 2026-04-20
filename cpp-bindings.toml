@@ -1,0 +1,11 @@
+# Configure the Sword library checkout and build settings.
+# This file is portable and stays with the repository.
+
+git_url = "https://github.com/Edcorp844/sword.git"
+git_rev = "HEAD"
+header = "include/sword/flatapi.h"
+lib_name = "sword"
+use_cmake = true
+link_kind = "static"
+
+# If you want to use a local checkout instead, create a `sword/` folder next to Cargo.toml.

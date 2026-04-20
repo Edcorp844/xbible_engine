@@ -1,0 +1,19 @@
+[package]
+name = "xbible_engine"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+directories = "5.0"
+uniffi = { version = "0.31.1", features = ["cli", "scaffolding-ffi-buffer-fns"] }
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[build-dependencies]
+uniffi = { version = "0.31.1", features = [ "build" ] }
+bindgen = "0.70"
+cmake = "0.1"
+toml = "0.7"
+pkg-config = "0.3"
