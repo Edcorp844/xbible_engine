@@ -13,5 +13,4 @@ pub fn make_sentence(words: Vec<String>) -> String{
 }
 
 pub mod sword_engine;
-
-pub use sword_engine::SwordEngine;
+pub mod bible_api;

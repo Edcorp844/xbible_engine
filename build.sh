@@ -1,5 +1,7 @@
 #!/bin/bash
 
+export MACOSX_DEPLOYMENT_TARGET=14.0
+
 # --- Styling ---
 CYAN='\033[0;36m'
 GREEN='\033[0;32m'
@@ -16,9 +18,10 @@ OUT_DIR="./bindings"
 SWIFT_PKG_DIR="../Bible_engine_swift" 
 
 # --- Target Data ---
+# Note: For Apple targets, we use "a" (static lib) for XCFramework compatibility
 TARGETS=(
-    "macOS (Intel)"        "x86_64-apple-darwin"      "dylib"
-    "macOS (Silicon)"      "aarch64-apple-darwin"    "dylib"
+    "macOS (Intel)"        "x86_64-apple-darwin"      "a"
+    "macOS (Silicon)"      "aarch64-apple-darwin"    "a"
     "iOS (Sim)"            "aarch64-apple-ios-sim"   "a"
     "iOS (Device)"         "aarch64-apple-ios"       "a"
     "Android (ARM64)"      "aarch64-linux-android"   "so"
@@ -71,7 +74,7 @@ for p_choice in $plat_choices; do
     echo -e "\n${BLUE}${BOLD}🔨 Building $LABEL ($TRIPLE)...${NC}"
     rustup target add "$TRIPLE" > /dev/null 2>&1
     
-    # We build staticlibs (.a) for XCFramework for better stability
+    # Static build for Apple platforms
     cargo build --target "$TRIPLE" --release
     
     if [ $? -eq 0 ]; then
@@ -83,11 +86,17 @@ for p_choice in $plat_choices; do
             if [ -n "$LANG" ]; then
                 echo -e "${YELLOW}📦 Generating $LANG bindings...${NC}"
                 mkdir -p "$OUT_DIR/$LANG"
+                
+                # Check for the library file (might be in target root or triple folder)
                 LIB_PATH="./target/$TRIPLE/release/lib${LIB_NAME}.${EXT}"
-                [ ! -f "$LIB_PATH" ] && LIB_PATH="./target/release/lib${LIB_NAME}.${EXT}"
+                if [ ! -f "$LIB_PATH" ]; then
+                    LIB_PATH="./target/release/lib${LIB_NAME}.${EXT}"
+                fi
 
                 if [ -f "$LIB_PATH" ]; then
                     cargo run --bin uniffi-bindgen generate --library "$LIB_PATH" --language "$LANG" --out-dir "$OUT_DIR/$LANG"
+                else
+                    echo -e "${RED}❌ Error: lib${LIB_NAME}.${EXT} not found.${NC}"
                 fi
             fi
         done
@@ -99,49 +108,60 @@ if [ "$SWIFT_SELECTED" = true ]; then
     echo -e "\n${MAGENTA}${BOLD}🍎 Creating Unified XCFramework...${NC}"
     
     SWIFT_BIND_DIR="$OUT_DIR/swift"
-    [ -f "$SWIFT_BIND_DIR/${LIB_NAME}FFI.modulemap" ] && mv "$SWIFT_BIND_DIR/${LIB_NAME}FFI.modulemap" "$SWIFT_BIND_DIR/module.modulemap"
+    
+    # Standardize modulemap name for Xcode
+    if [ -f "$SWIFT_BIND_DIR/${LIB_NAME}FFI.modulemap" ]; then
+        mv "$SWIFT_BIND_DIR/${LIB_NAME}FFI.modulemap" "$SWIFT_BIND_DIR/module.modulemap"
+    fi
 
-    mkdir -p ios
-    rm -rf ios/${LIB_NAME}.xcframework
+    # Clean up previous framework
+    rm -rf "${LIB_NAME}.xcframework"
 
     # Initialize XCFramework Arguments
     XCB_ARGS=""
 
-    # Add macOS if built
+    # 1. Add macOS (M1/Silicon)
     if [ "$MACOS_BUILT" = true ]; then
-        # Note: For XCFrameworks, using the static library (.a) is often preferred over .dylib
         MAC_LIB="./target/aarch64-apple-darwin/release/lib${LIB_NAME}.a"
-        [ ! -f "$MAC_LIB" ] && MAC_LIB="./target/release/lib${LIB_NAME}.a"
         if [ -f "$MAC_LIB" ]; then
             XCB_ARGS="$XCB_ARGS -library $MAC_LIB -headers $SWIFT_BIND_DIR"
-            echo -e "${CYAN}Added macOS to bundle.${NC}"
+            echo -e "${CYAN}✓ Linked macOS (Silicon)${NC}"
         fi
     fi
 
-    # Add iOS Simulator if built
+    # 2. Add iOS Simulator
     if [ "$IOS_SIM_BUILT" = true ]; then
-        XCB_ARGS="$XCB_ARGS -library ./target/aarch64-apple-ios-sim/release/lib${LIB_NAME}.a -headers $SWIFT_BIND_DIR"
-        echo -e "${CYAN}Added iOS Simulator to bundle.${NC}"
+        SIM_LIB="./target/aarch64-apple-ios-sim/release/lib${LIB_NAME}.a"
+        if [ -f "$SIM_LIB" ]; then
+            XCB_ARGS="$XCB_ARGS -library $SIM_LIB -headers $SWIFT_BIND_DIR"
+            echo -e "${CYAN}✓ Linked iOS Simulator${NC}"
+        fi
     fi
 
-    # Add iOS Device if built
+    # 3. Add iOS Device
     if [ "$IOS_DEV_BUILT" = true ]; then
-        XCB_ARGS="$XCB_ARGS -library ./target/aarch64-apple-ios/release/lib${LIB_NAME}.a -headers $SWIFT_BIND_DIR"
-        echo -e "${CYAN}Added iOS Device to bundle.${NC}"
+        DEV_LIB="./target/aarch64-apple-ios/release/lib${LIB_NAME}.a"
+        if [ -f "$DEV_LIB" ]; then
+            XCB_ARGS="$XCB_ARGS -library $DEV_LIB -headers $SWIFT_BIND_DIR"
+            echo -e "${CYAN}✓ Linked iOS Device${NC}"
+        fi
     fi
 
-    # Create the XCFramework only if we have libraries to bundle
+    # Execute xcodebuild if we have at least one library
     if [ -n "$XCB_ARGS" ]; then
-        xcodebuild -create-xcframework $XCB_ARGS -output "ios/${LIB_NAME}.xcframework"
+        xcodebuild -create-xcframework $XCB_ARGS -output "${LIB_NAME}.xcframework"
         
-        echo -e "${YELLOW}Depositing into Swift Package...${NC}"
-        mkdir -p "$SWIFT_PKG_DIR/Sources/Bible_engine"
-        cp -r ios/${LIB_NAME}.xcframework "$SWIFT_PKG_DIR/"
-        cp "$SWIFT_BIND_DIR/${LIB_NAME}.swift" "$SWIFT_PKG_DIR/Sources/Bible_engine/"
+        echo -e "\n${YELLOW}🚚 Depositing into Swift Package: $SWIFT_PKG_DIR${NC}"
+        mkdir -p "$SWIFT_PKG_DIR/Sources/XbibleEngine" # Folder name must match target
         
+        # Copy the framework and the swift bridge
+        cp -r "${LIB_NAME}.xcframework" "$SWIFT_PKG_DIR/"
+        cp "$SWIFT_BIND_DIR/${LIB_NAME}.swift" "$SWIFT_PKG_DIR/Sources/XbibleEngine/"
+        
+        # Re-sync the local package
         (cd "$SWIFT_PKG_DIR" && swift package clean)
-        echo -e "${GREEN}${BOLD}✅ Universal Package Ready for local import!${NC}"
+        echo -e "${GREEN}${BOLD}✅ Universal Package Ready! Import $SWIFT_PKG_DIR in Xcode.${NC}"
     else
-        echo -e "${RED}❌ No Apple libraries found to bundle. Did you select targets 2, 3, or 4?${NC}"
+        echo -e "${RED}❌ No Apple targets built. Cannot create XCFramework.${NC}"
     fi
 fi

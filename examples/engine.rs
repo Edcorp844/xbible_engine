@@ -1,23 +1,37 @@
-//use xbible_engine::sword_engine::SwordEngine;
+use xbible_engine::sword_engine::SwordEngine;
 
+fn main() {
+    let engine = SwordEngine::new();
 
-fn main(){
-    /*let engine = SwordEngine::new();
+    println!("Listing remote Sword sources...");
+    let sources = engine.get_remote_source_list();
 
-    // Example: Lookup a verse from the KJV Bible
-    let verse_text = engine.lookup_verse("KJV", "John 3:16");
-    if !verse_text.is_empty() {
-        println!("John 3:16 (KJV): {}", verse_text);
-    } else {
-        println!("KJV module not found or verse not available");
+    if sources.is_empty() {
+        println!("No remote sources were found.");
+        println!("Make sure Sword can access the internet and that the install manager is initialized correctly.");
+        return;
     }
 
-    // Example: Get list of available modules
-    let modules = engine.get_modules();
-    println!("Found {} modules", modules.len());
+    println!("Remote sources (official Sword repositories):");
+    for source in &sources {
+        println!(" - {}", source);
+    }
 
-    // Example: Get Bible modules specifically
-    let bible_modules = engine.get_bible_modules();
-    println!("Found {} Bible modules", bible_modules.len());*/
+    let source_name = &sources[0];
+    println!("\nFetching modules from source: {}", source_name);
+    let modules = engine.fetch_remote_modules(source_name);
 
+    if modules.is_empty() {
+        println!("No modules were retrieved from source {}.", source_name);
+        return;
+    }
+
+    println!("Found {} remote modules from {}:", modules.len(), source_name);
+    for module in modules.iter().take(50) {
+        println!("- {} [{}] {} ({})", module.name, module.category, module.language, module.version);
+    }
+
+    println!("\nInstalled local modules:");
+    let installed = engine.get_modules();
+    println!("{} installed modules found", installed.len());
 }

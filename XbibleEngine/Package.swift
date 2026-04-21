@@ -5,11 +5,14 @@ import PackageDescription
 
 let package = Package(
     name: "XbibleEngine",
+    platforms: [
+        .macOS(.v15),
+    ],
     products: [
         // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
             name: "XbibleEngine",
-            targets: ["XbibleEngine"]
+            targets: ["XbibleEngine"],  
         ),
     ],
     targets: [
@@ -17,7 +20,14 @@ let package = Package(
         // Targets can depend on other targets in this package and products from dependencies.
         .target(
             name: "XbibleEngine",
-            dependencies: ["xbible_engineFFI"]
+            dependencies: ["xbible_engineFFI"],
+            linkerSettings: [
+                .linkedLibrary("c++"),
+                .linkedLibrary("bz2"),
+                .linkedLibrary("z"),
+                .linkedLibrary("curl"),
+                .linkedLibrary("lzma")
+            ]
         ),
         .binaryTarget(
             name: "xbible_engineFFI",

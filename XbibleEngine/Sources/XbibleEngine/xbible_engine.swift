@@ -419,6 +419,78 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt32: FfiConverterPrimitive {
+    typealias FfiType = Int32
+    typealias SwiftType = Int32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int32, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int64, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterDouble: FfiConverterPrimitive {
+    typealias FfiType = Double
+    typealias SwiftType = Double
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Double {
+        return try lift(readDouble(&buf))
+    }
+
+    public static func write(_ value: Double, into buf: inout [UInt8]) {
+        writeDouble(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterBool : FfiConverter {
+    typealias FfiType = Int8
+    typealias SwiftType = Bool
+
+    public static func lift(_ value: Int8) throws -> Bool {
+        return value != 0
+    }
+
+    public static func lower(_ value: Bool) -> Int8 {
+        return value ? 1 : 0
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Bool, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
@@ -457,6 +529,1257 @@ fileprivate struct FfiConverterString: FfiConverter {
     }
 }
 
+
+
+
+/**
+ * High-level Bible API abstraction layer for UniFFI export
+ * Provides a clean interface for Swift and other languages to interact with Bible modules
+ */
+public protocol BibleEngineProtocol: AnyObject, Sendable {
+    
+    /**
+     * Fetch available modules from a remote source
+     */
+    func fetchRemoteModules(sourceName: String)  -> [SwordModule]
+    
+    /**
+     * Get all available Bible modules
+     */
+    func getAvailableModules()  -> [SwordModule]
+    
+    /**
+     * Get all book modules (devotional books, etc.)
+     */
+    func getBookModules()  -> [SwordModule]
+    
+    /**
+     * Get the book structure for a specific module
+     */
+    func getBooks(moduleName: String)  -> [ModuleBook]
+    
+    /**
+     * Get content for a whole chapter (e.g., "Genesis 1" or "John 3")
+     * using a specific module
+     */
+    func getChapterContent(moduleName: String, reference: String)  -> [Section]
+    
+    /**
+     * Get all commentary modules
+     */
+    func getCommentaryModules()  -> [SwordModule]
+    
+    /**
+     * Get content for a specific reference (e.g., "Genesis 1:1" or "John 3:16")
+     * using a specific module
+     */
+    func getContent(moduleName: String, reference: String)  -> [Section]
+    
+    /**
+     * Get all dictionary modules
+     */
+    func getDictionaryModules()  -> [SwordModule]
+    
+    /**
+     * Get download progress (0.0 to 1.0)
+     */
+    func getDownloadProgress()  -> Double
+    
+    /**
+     * Get detailed download progress for module installation
+     */
+    func getDownloadProgressDetails()  -> DownloadProgress
+    
+    /**
+     * Get installed modules by category
+     */
+    func getInstalledModulesByCategory(category: String)  -> [SwordModule]
+    
+    /**
+     * Get total size of all installed modules in bytes
+     */
+    func getInstalledModulesSize()  -> Int64
+    
+    /**
+     * Get modules by language
+     */
+    func getModulesByLanguage(languageCode: String, sourceName: String)  -> [SwordModule]
+    
+    /**
+     * Get information about a specific remote module
+     */
+    func getRemoteModuleInfo(sourceName: String, moduleName: String)  -> SwordModule?
+    
+    /**
+     * Get list of remote sources
+     */
+    func getRemoteSources()  -> [String]
+    
+    /**
+     * Get list of remote sources with details
+     */
+    func getRemoteSourcesWithDetails()  -> [ModuleSource]
+    
+    /**
+     * Get helper function for source description
+     */
+    func getSourceDescription(source: String)  -> String
+    
+    /**
+     * Get helper function for source URL
+     */
+    func getSourceUrl(source: String)  -> String
+    
+    /**
+     * Install a remote module from a source
+     * Returns 0 on success, non-zero error code on failure
+     */
+    func installModule(source: String, moduleName: String)  -> Int32
+    
+    /**
+     * Install a remote module from a source with detailed progress tracking
+     * Returns 0 on success, non-zero error code on failure
+     */
+    func installModuleWithProgress(source: String, moduleName: String)  -> Int32
+    
+    /**
+     * Check if a module is installed
+     */
+    func isModuleInstalled(moduleName: String)  -> Bool
+    
+    /**
+     * Refresh the list of installed modules
+     */
+    func refreshInstalledModules()  -> [SwordModule]
+    
+    /**
+     * Search for modules matching a query across all sources
+     */
+    func searchModules(sourceName: String, query: String)  -> [SwordModule]
+    
+}
+/**
+ * High-level Bible API abstraction layer for UniFFI export
+ * Provides a clean interface for Swift and other languages to interact with Bible modules
+ */
+open class BibleEngine: BibleEngineProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_xbible_engine_fn_clone_bibleengine(self.handle, $0) }
+    }
+    /**
+     * Create a new BibleEngine instance
+     */
+public convenience init() {
+    let handle =
+        try! rustCall() {
+    uniffi_xbible_engine_fn_constructor_bibleengine_new($0
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_xbible_engine_fn_free_bibleengine(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Fetch available modules from a remote source
+     */
+open func fetchRemoteModules(sourceName: String) -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_fetch_remote_modules(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sourceName),$0
+    )
+})
+}
+    
+    /**
+     * Get all available Bible modules
+     */
+open func getAvailableModules() -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_available_modules(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Get all book modules (devotional books, etc.)
+     */
+open func getBookModules() -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_book_modules(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Get the book structure for a specific module
+     */
+open func getBooks(moduleName: String) -> [ModuleBook]  {
+    return try!  FfiConverterSequenceTypeModuleBook.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_books(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(moduleName),$0
+    )
+})
+}
+    
+    /**
+     * Get content for a whole chapter (e.g., "Genesis 1" or "John 3")
+     * using a specific module
+     */
+open func getChapterContent(moduleName: String, reference: String) -> [Section]  {
+    return try!  FfiConverterSequenceTypeSection.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_chapter_content(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(moduleName),
+        FfiConverterString.lower(reference),$0
+    )
+})
+}
+    
+    /**
+     * Get all commentary modules
+     */
+open func getCommentaryModules() -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_commentary_modules(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Get content for a specific reference (e.g., "Genesis 1:1" or "John 3:16")
+     * using a specific module
+     */
+open func getContent(moduleName: String, reference: String) -> [Section]  {
+    return try!  FfiConverterSequenceTypeSection.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_content(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(moduleName),
+        FfiConverterString.lower(reference),$0
+    )
+})
+}
+    
+    /**
+     * Get all dictionary modules
+     */
+open func getDictionaryModules() -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_dictionary_modules(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Get download progress (0.0 to 1.0)
+     */
+open func getDownloadProgress() -> Double  {
+    return try!  FfiConverterDouble.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_download_progress(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Get detailed download progress for module installation
+     */
+open func getDownloadProgressDetails() -> DownloadProgress  {
+    return try!  FfiConverterTypeDownloadProgress_lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_download_progress_details(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Get installed modules by category
+     */
+open func getInstalledModulesByCategory(category: String) -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_installed_modules_by_category(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(category),$0
+    )
+})
+}
+    
+    /**
+     * Get total size of all installed modules in bytes
+     */
+open func getInstalledModulesSize() -> Int64  {
+    return try!  FfiConverterInt64.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_installed_modules_size(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Get modules by language
+     */
+open func getModulesByLanguage(languageCode: String, sourceName: String) -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_modules_by_language(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(languageCode),
+        FfiConverterString.lower(sourceName),$0
+    )
+})
+}
+    
+    /**
+     * Get information about a specific remote module
+     */
+open func getRemoteModuleInfo(sourceName: String, moduleName: String) -> SwordModule?  {
+    return try!  FfiConverterOptionTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_remote_module_info(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sourceName),
+        FfiConverterString.lower(moduleName),$0
+    )
+})
+}
+    
+    /**
+     * Get list of remote sources
+     */
+open func getRemoteSources() -> [String]  {
+    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_remote_sources(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Get list of remote sources with details
+     */
+open func getRemoteSourcesWithDetails() -> [ModuleSource]  {
+    return try!  FfiConverterSequenceTypeModuleSource.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_remote_sources_with_details(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Get helper function for source description
+     */
+open func getSourceDescription(source: String) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_source_description(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(source),$0
+    )
+})
+}
+    
+    /**
+     * Get helper function for source URL
+     */
+open func getSourceUrl(source: String) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_source_url(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(source),$0
+    )
+})
+}
+    
+    /**
+     * Install a remote module from a source
+     * Returns 0 on success, non-zero error code on failure
+     */
+open func installModule(source: String, moduleName: String) -> Int32  {
+    return try!  FfiConverterInt32.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_install_module(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(source),
+        FfiConverterString.lower(moduleName),$0
+    )
+})
+}
+    
+    /**
+     * Install a remote module from a source with detailed progress tracking
+     * Returns 0 on success, non-zero error code on failure
+     */
+open func installModuleWithProgress(source: String, moduleName: String) -> Int32  {
+    return try!  FfiConverterInt32.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_install_module_with_progress(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(source),
+        FfiConverterString.lower(moduleName),$0
+    )
+})
+}
+    
+    /**
+     * Check if a module is installed
+     */
+open func isModuleInstalled(moduleName: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_is_module_installed(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(moduleName),$0
+    )
+})
+}
+    
+    /**
+     * Refresh the list of installed modules
+     */
+open func refreshInstalledModules() -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_refresh_installed_modules(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Search for modules matching a query across all sources
+     */
+open func searchModules(sourceName: String, query: String) -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_search_modules(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sourceName),
+        FfiConverterString.lower(query),$0
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBibleEngine: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = BibleEngine
+
+    public static func lift(_ handle: UInt64) throws -> BibleEngine {
+        return BibleEngine(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: BibleEngine) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BibleEngine {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: BibleEngine, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBibleEngine_lift(_ handle: UInt64) throws -> BibleEngine {
+    return try FfiConverterTypeBibleEngine.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBibleEngine_lower(_ value: BibleEngine) -> UInt64 {
+    return FfiConverterTypeBibleEngine.lower(value)
+}
+
+
+
+
+/**
+ * Download progress details for module installation
+ */
+public struct DownloadProgress: Equatable, Hashable {
+    public var progress: Double
+    public var downloadedBytes: Int64
+    public var totalBytes: Int64
+    public var currentModule: String
+    public var status: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(progress: Double, downloadedBytes: Int64, totalBytes: Int64, currentModule: String, status: String) {
+        self.progress = progress
+        self.downloadedBytes = downloadedBytes
+        self.totalBytes = totalBytes
+        self.currentModule = currentModule
+        self.status = status
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DownloadProgress: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDownloadProgress: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DownloadProgress {
+        return
+            try DownloadProgress(
+                progress: FfiConverterDouble.read(from: &buf), 
+                downloadedBytes: FfiConverterInt64.read(from: &buf), 
+                totalBytes: FfiConverterInt64.read(from: &buf), 
+                currentModule: FfiConverterString.read(from: &buf), 
+                status: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DownloadProgress, into buf: inout [UInt8]) {
+        FfiConverterDouble.write(value.progress, into: &buf)
+        FfiConverterInt64.write(value.downloadedBytes, into: &buf)
+        FfiConverterInt64.write(value.totalBytes, into: &buf)
+        FfiConverterString.write(value.currentModule, into: &buf)
+        FfiConverterString.write(value.status, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDownloadProgress_lift(_ buf: RustBuffer) throws -> DownloadProgress {
+    return try FfiConverterTypeDownloadProgress.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDownloadProgress_lower(_ value: DownloadProgress) -> RustBuffer {
+    return FfiConverterTypeDownloadProgress.lower(value)
+}
+
+
+public struct LexicalInfo: Equatable, Hashable {
+    public var strongs: [String]
+    public var lemma: String?
+    public var gloss: String?
+    public var morph: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(strongs: [String], lemma: String?, gloss: String?, morph: [String]) {
+        self.strongs = strongs
+        self.lemma = lemma
+        self.gloss = gloss
+        self.morph = morph
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension LexicalInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLexicalInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LexicalInfo {
+        return
+            try LexicalInfo(
+                strongs: FfiConverterSequenceString.read(from: &buf), 
+                lemma: FfiConverterOptionString.read(from: &buf), 
+                gloss: FfiConverterOptionString.read(from: &buf), 
+                morph: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LexicalInfo, into buf: inout [UInt8]) {
+        FfiConverterSequenceString.write(value.strongs, into: &buf)
+        FfiConverterOptionString.write(value.lemma, into: &buf)
+        FfiConverterOptionString.write(value.gloss, into: &buf)
+        FfiConverterSequenceString.write(value.morph, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLexicalInfo_lift(_ buf: RustBuffer) throws -> LexicalInfo {
+    return try FfiConverterTypeLexicalInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLexicalInfo_lower(_ value: LexicalInfo) -> RustBuffer {
+    return FfiConverterTypeLexicalInfo.lower(value)
+}
+
+
+public struct ModuleBook: Equatable, Hashable {
+    public var name: String
+    public var chapters: [ModuleChapter]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, chapters: [ModuleChapter]) {
+        self.name = name
+        self.chapters = chapters
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ModuleBook: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeModuleBook: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ModuleBook {
+        return
+            try ModuleBook(
+                name: FfiConverterString.read(from: &buf), 
+                chapters: FfiConverterSequenceTypeModuleChapter.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ModuleBook, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterSequenceTypeModuleChapter.write(value.chapters, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeModuleBook_lift(_ buf: RustBuffer) throws -> ModuleBook {
+    return try FfiConverterTypeModuleBook.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeModuleBook_lower(_ value: ModuleBook) -> RustBuffer {
+    return FfiConverterTypeModuleBook.lower(value)
+}
+
+
+public struct ModuleChapter: Equatable, Hashable {
+    public var number: Int32
+    public var verseCount: Int32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(number: Int32, verseCount: Int32) {
+        self.number = number
+        self.verseCount = verseCount
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ModuleChapter: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeModuleChapter: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ModuleChapter {
+        return
+            try ModuleChapter(
+                number: FfiConverterInt32.read(from: &buf), 
+                verseCount: FfiConverterInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ModuleChapter, into buf: inout [UInt8]) {
+        FfiConverterInt32.write(value.number, into: &buf)
+        FfiConverterInt32.write(value.verseCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeModuleChapter_lift(_ buf: RustBuffer) throws -> ModuleChapter {
+    return try FfiConverterTypeModuleChapter.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeModuleChapter_lower(_ value: ModuleChapter) -> RustBuffer {
+    return FfiConverterTypeModuleChapter.lower(value)
+}
+
+
+/**
+ * Remote module source information
+ */
+public struct ModuleSource: Equatable, Hashable {
+    public var name: String
+    public var description: String
+    public var url: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, description: String, url: String) {
+        self.name = name
+        self.description = description
+        self.url = url
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ModuleSource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeModuleSource: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ModuleSource {
+        return
+            try ModuleSource(
+                name: FfiConverterString.read(from: &buf), 
+                description: FfiConverterString.read(from: &buf), 
+                url: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ModuleSource, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.description, into: &buf)
+        FfiConverterString.write(value.url, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeModuleSource_lift(_ buf: RustBuffer) throws -> ModuleSource {
+    return try FfiConverterTypeModuleSource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeModuleSource_lower(_ value: ModuleSource) -> RustBuffer {
+    return FfiConverterTypeModuleSource.lower(value)
+}
+
+
+public struct Section: Equatable, Hashable {
+    public var title: [Word]
+    public var verses: [Verse]
+    public var textDirection: TextDirection
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(title: [Word], verses: [Verse], textDirection: TextDirection) {
+        self.title = title
+        self.verses = verses
+        self.textDirection = textDirection
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Section: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSection: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Section {
+        return
+            try Section(
+                title: FfiConverterSequenceTypeWord.read(from: &buf), 
+                verses: FfiConverterSequenceTypeVerse.read(from: &buf), 
+                textDirection: FfiConverterTypeTextDirection.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Section, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeWord.write(value.title, into: &buf)
+        FfiConverterSequenceTypeVerse.write(value.verses, into: &buf)
+        FfiConverterTypeTextDirection.write(value.textDirection, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSection_lift(_ buf: RustBuffer) throws -> Section {
+    return try FfiConverterTypeSection.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSection_lower(_ value: Section) -> RustBuffer {
+    return FfiConverterTypeSection.lower(value)
+}
+
+
+public struct SwordModule: Equatable, Hashable {
+    public var name: String
+    public var description: String
+    public var category: String
+    public var language: String
+    public var version: String
+    public var delta: String
+    public var cipherKey: String
+    public var features: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, description: String, category: String, language: String, version: String, delta: String, cipherKey: String, features: [String]) {
+        self.name = name
+        self.description = description
+        self.category = category
+        self.language = language
+        self.version = version
+        self.delta = delta
+        self.cipherKey = cipherKey
+        self.features = features
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SwordModule: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSwordModule: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwordModule {
+        return
+            try SwordModule(
+                name: FfiConverterString.read(from: &buf), 
+                description: FfiConverterString.read(from: &buf), 
+                category: FfiConverterString.read(from: &buf), 
+                language: FfiConverterString.read(from: &buf), 
+                version: FfiConverterString.read(from: &buf), 
+                delta: FfiConverterString.read(from: &buf), 
+                cipherKey: FfiConverterString.read(from: &buf), 
+                features: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SwordModule, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.description, into: &buf)
+        FfiConverterString.write(value.category, into: &buf)
+        FfiConverterString.write(value.language, into: &buf)
+        FfiConverterString.write(value.version, into: &buf)
+        FfiConverterString.write(value.delta, into: &buf)
+        FfiConverterString.write(value.cipherKey, into: &buf)
+        FfiConverterSequenceString.write(value.features, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSwordModule_lift(_ buf: RustBuffer) throws -> SwordModule {
+    return try FfiConverterTypeSwordModule.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSwordModule_lower(_ value: SwordModule) -> RustBuffer {
+    return FfiConverterTypeSwordModule.lower(value)
+}
+
+
+public struct Verse: Equatable, Hashable {
+    public var osisId: String
+    public var number: Int32
+    public var words: [Word]
+    public var notes: [String]
+    public var isParagraphStart: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(osisId: String, number: Int32, words: [Word], notes: [String], isParagraphStart: Bool) {
+        self.osisId = osisId
+        self.number = number
+        self.words = words
+        self.notes = notes
+        self.isParagraphStart = isParagraphStart
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Verse: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVerse: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Verse {
+        return
+            try Verse(
+                osisId: FfiConverterString.read(from: &buf), 
+                number: FfiConverterInt32.read(from: &buf), 
+                words: FfiConverterSequenceTypeWord.read(from: &buf), 
+                notes: FfiConverterSequenceString.read(from: &buf), 
+                isParagraphStart: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Verse, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.osisId, into: &buf)
+        FfiConverterInt32.write(value.number, into: &buf)
+        FfiConverterSequenceTypeWord.write(value.words, into: &buf)
+        FfiConverterSequenceString.write(value.notes, into: &buf)
+        FfiConverterBool.write(value.isParagraphStart, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVerse_lift(_ buf: RustBuffer) throws -> Verse {
+    return try FfiConverterTypeVerse.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVerse_lower(_ value: Verse) -> RustBuffer {
+    return FfiConverterTypeVerse.lower(value)
+}
+
+
+public struct Word: Equatable, Hashable {
+    public var text: String
+    public var isRed: Bool
+    public var isItalic: Bool
+    public var isBoldText: Bool
+    public var lex: LexicalInfo?
+    public var note: String?
+    public var isFirstInGroup: Bool
+    public var isLastInGroup: Bool
+    public var isPunctuation: Bool
+    public var isTitle: Bool
+    public var language: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(text: String, isRed: Bool, isItalic: Bool, isBoldText: Bool, lex: LexicalInfo?, note: String?, isFirstInGroup: Bool, isLastInGroup: Bool, isPunctuation: Bool, isTitle: Bool, language: String) {
+        self.text = text
+        self.isRed = isRed
+        self.isItalic = isItalic
+        self.isBoldText = isBoldText
+        self.lex = lex
+        self.note = note
+        self.isFirstInGroup = isFirstInGroup
+        self.isLastInGroup = isLastInGroup
+        self.isPunctuation = isPunctuation
+        self.isTitle = isTitle
+        self.language = language
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Word: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Word {
+        return
+            try Word(
+                text: FfiConverterString.read(from: &buf), 
+                isRed: FfiConverterBool.read(from: &buf), 
+                isItalic: FfiConverterBool.read(from: &buf), 
+                isBoldText: FfiConverterBool.read(from: &buf), 
+                lex: FfiConverterOptionTypeLexicalInfo.read(from: &buf), 
+                note: FfiConverterOptionString.read(from: &buf), 
+                isFirstInGroup: FfiConverterBool.read(from: &buf), 
+                isLastInGroup: FfiConverterBool.read(from: &buf), 
+                isPunctuation: FfiConverterBool.read(from: &buf), 
+                isTitle: FfiConverterBool.read(from: &buf), 
+                language: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Word, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.text, into: &buf)
+        FfiConverterBool.write(value.isRed, into: &buf)
+        FfiConverterBool.write(value.isItalic, into: &buf)
+        FfiConverterBool.write(value.isBoldText, into: &buf)
+        FfiConverterOptionTypeLexicalInfo.write(value.lex, into: &buf)
+        FfiConverterOptionString.write(value.note, into: &buf)
+        FfiConverterBool.write(value.isFirstInGroup, into: &buf)
+        FfiConverterBool.write(value.isLastInGroup, into: &buf)
+        FfiConverterBool.write(value.isPunctuation, into: &buf)
+        FfiConverterBool.write(value.isTitle, into: &buf)
+        FfiConverterString.write(value.language, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWord_lift(_ buf: RustBuffer) throws -> Word {
+    return try FfiConverterTypeWord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWord_lower(_ value: Word) -> RustBuffer {
+    return FfiConverterTypeWord.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum TextDirection: Equatable, Hashable {
+    
+    case rtl
+    case ltr
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension TextDirection: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTextDirection: FfiConverterRustBuffer {
+    typealias SwiftType = TextDirection
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TextDirection {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .rtl
+        
+        case 2: return .ltr
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: TextDirection, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .rtl:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .ltr:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextDirection_lift(_ buf: RustBuffer) throws -> TextDirection {
+    return try FfiConverterTypeTextDirection.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextDirection_lower(_ value: TextDirection) -> RustBuffer {
+    return FfiConverterTypeTextDirection.lower(value)
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
+    typealias SwiftType = String?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterString.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeLexicalInfo: FfiConverterRustBuffer {
+    typealias SwiftType = LexicalInfo?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeLexicalInfo.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeLexicalInfo.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeSwordModule: FfiConverterRustBuffer {
+    typealias SwiftType = SwordModule?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeSwordModule.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeSwordModule.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -477,6 +1800,181 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeModuleBook: FfiConverterRustBuffer {
+    typealias SwiftType = [ModuleBook]
+
+    public static func write(_ value: [ModuleBook], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeModuleBook.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ModuleBook] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ModuleBook]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeModuleBook.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeModuleChapter: FfiConverterRustBuffer {
+    typealias SwiftType = [ModuleChapter]
+
+    public static func write(_ value: [ModuleChapter], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeModuleChapter.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ModuleChapter] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ModuleChapter]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeModuleChapter.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeModuleSource: FfiConverterRustBuffer {
+    typealias SwiftType = [ModuleSource]
+
+    public static func write(_ value: [ModuleSource], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeModuleSource.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ModuleSource] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ModuleSource]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeModuleSource.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeSection: FfiConverterRustBuffer {
+    typealias SwiftType = [Section]
+
+    public static func write(_ value: [Section], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSection.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Section] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Section]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSection.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeSwordModule: FfiConverterRustBuffer {
+    typealias SwiftType = [SwordModule]
+
+    public static func write(_ value: [SwordModule], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSwordModule.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SwordModule] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SwordModule]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSwordModule.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeVerse: FfiConverterRustBuffer {
+    typealias SwiftType = [Verse]
+
+    public static func write(_ value: [Verse], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeVerse.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Verse] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Verse]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeVerse.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWord: FfiConverterRustBuffer {
+    typealias SwiftType = [Word]
+
+    public static func write(_ value: [Word], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Word] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Word]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWord.read(from: &buf))
         }
         return seq
     }
@@ -505,6 +2003,78 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.contractVersionMismatch
     }
     if (uniffi_xbible_engine_checksum_func_make_sentence() != 47495) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_fetch_remote_modules() != 41165) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_available_modules() != 6470) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_book_modules() != 3411) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_books() != 56744) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_chapter_content() != 42938) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_commentary_modules() != 2553) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_content() != 6151) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_dictionary_modules() != 60555) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_download_progress() != 52989) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_download_progress_details() != 46458) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_installed_modules_by_category() != 63365) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_installed_modules_size() != 49363) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_modules_by_language() != 45564) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_remote_module_info() != 18832) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_remote_sources() != 59766) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_remote_sources_with_details() != 65293) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_source_description() != 58741) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_source_url() != 57952) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_install_module() != 38326) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_install_module_with_progress() != 23462) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_is_module_installed() != 4220) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_refresh_installed_modules() != 20742) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_search_modules() != 29770) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_constructor_bibleengine_new() != 6578) {
         return InitializationResult.apiChecksumMismatch
     }
 

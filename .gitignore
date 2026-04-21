@@ -1,3 +1,4 @@
+/XbibleEngine
 /target
 /bindings
 /macos
@@ -5,6 +6,5 @@
 /android
 /linux
 /windows
-/XbibleEngine
-/XbibleEngine
+
 .DS_Store

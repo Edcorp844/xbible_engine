@@ -6,13 +6,15 @@ build = "build.rs"
 
 [dependencies]
 directories = "5.0"
+isolang = "2.4.0"
+roxmltree = "0.21.1"
+serde = { version = "1.0.228", features = ["derive"] }
 uniffi = { version = "0.31.1", features = ["cli", "scaffolding-ffi-buffer-fns"] }
 
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [build-dependencies]
-uniffi = { version = "0.31.1", features = [ "build" ] }
 bindgen = "0.70"
 cmake = "0.1"
 toml = "0.7"
