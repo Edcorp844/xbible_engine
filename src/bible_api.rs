@@ -19,6 +19,11 @@ pub struct ModuleSource {
     pub url: String,                // Source URL
 }
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct EngineGlobalOption {
+    pub name: String,             
+    pub state: String,        
+}
 /// High-level Bible API abstraction layer for UniFFI export
 /// Provides a clean interface for Swift and other languages to interact with Bible modules
 #[derive(uniffi::Object)]
@@ -34,6 +39,18 @@ impl BibleEngine {
         Arc::new(Self {
             sword_engine: SwordEngine::new(),
         })
+    }
+
+    //set engine global options to get a module
+    pub fn set_global_options(&self, options: Vec<EngineGlobalOption>) {
+        unsafe {
+            options.iter().for_each(|opt| {
+                self.sword_engine.set_global_options(
+                    &[opt.name.as_str()],
+                    &opt.state.as_str(),
+                )
+            });
+        }   
     }
 
     /// Get all available Bible modules
@@ -214,6 +231,8 @@ impl BibleEngine {
         let modules = self.sword_engine.fetch_remote_modules(source_name);
         modules.into_iter().filter(|m| m.language.contains(language_code)).collect()
     }
+
+
 }
 
 // Re-export the data structures for UniFFI

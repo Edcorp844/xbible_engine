@@ -657,6 +657,8 @@ public protocol BibleEngineProtocol: AnyObject, Sendable {
      */
     func searchModules(sourceName: String, query: String)  -> [SwordModule]
     
+    func setGlobalOptions(options: [EngineGlobalOption]) 
+    
 }
 /**
  * High-level Bible API abstraction layer for UniFFI export
@@ -1002,6 +1004,14 @@ open func searchModules(sourceName: String, query: String) -> [SwordModule]  {
 })
 }
     
+open func setGlobalOptions(options: [EngineGlobalOption])  {try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_set_global_options(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceTypeEngineGlobalOption.lower(options),$0
+    )
+}
+}
+    
 
     
 }
@@ -1116,6 +1126,60 @@ public func FfiConverterTypeDownloadProgress_lift(_ buf: RustBuffer) throws -> D
 #endif
 public func FfiConverterTypeDownloadProgress_lower(_ value: DownloadProgress) -> RustBuffer {
     return FfiConverterTypeDownloadProgress.lower(value)
+}
+
+
+public struct EngineGlobalOption: Equatable, Hashable {
+    public var name: String
+    public var state: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, state: String) {
+        self.name = name
+        self.state = state
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension EngineGlobalOption: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEngineGlobalOption: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EngineGlobalOption {
+        return
+            try EngineGlobalOption(
+                name: FfiConverterString.read(from: &buf), 
+                state: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EngineGlobalOption, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.state, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEngineGlobalOption_lift(_ buf: RustBuffer) throws -> EngineGlobalOption {
+    return try FfiConverterTypeEngineGlobalOption.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEngineGlobalOption_lower(_ value: EngineGlobalOption) -> RustBuffer {
+    return FfiConverterTypeEngineGlobalOption.lower(value)
 }
 
 
@@ -1808,6 +1872,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeEngineGlobalOption: FfiConverterRustBuffer {
+    typealias SwiftType = [EngineGlobalOption]
+
+    public static func write(_ value: [EngineGlobalOption], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeEngineGlobalOption.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [EngineGlobalOption] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [EngineGlobalOption]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeEngineGlobalOption.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeModuleBook: FfiConverterRustBuffer {
     typealias SwiftType = [ModuleBook]
 
@@ -2072,6 +2161,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_xbible_engine_checksum_method_bibleengine_search_modules() != 29770) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_set_global_options() != 41351) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_xbible_engine_checksum_constructor_bibleengine_new() != 6578) {

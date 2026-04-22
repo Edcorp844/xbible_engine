@@ -91,7 +91,7 @@ impl SwordEngine {
         if let Some(raw_osis) =
             unsafe { self.sword_ptr_to_string(org_crosswire_sword_SWModule_getRawEntry(h_mod)) }
         {
-            println!("[SINGLE ENTRY RAW]: {}", raw_osis);
+            //println!("[SINGLE ENTRY RAW]: {}", raw_osis);
             return osis_engine.parse_osis_to_sections(
                 module.language.clone(),
                 &raw_osis,

@@ -92,6 +92,12 @@ impl SwordEngine {
         unsafe {
             org_crosswire_sword_SWMgr_setGlobalOption(inner.mgr, utf8_key.as_ptr(), on_val.as_ptr())
         };
+
+        // Also sync the InstallMgr config to refresh local module detection
+        unsafe {
+            org_crosswire_sword_InstallMgr_syncConfig(inner.install_mgr);
+        };
+
         println!("[SwordEngine] SWMgr rebuilt successfully");
     }
 
@@ -113,6 +119,17 @@ impl SwordEngine {
                 }
             }
         }
+
+        // If no sources were found (network issues, permissions, etc.), provide defaults
+        if sources.is_empty() {
+            println!("[SwordEngine] No remote sources found, using default sources");
+            sources = vec![
+                "CrossWire".to_string(),
+                "IBT".to_string(),
+                "ibiblio".to_string(),
+            ];
+        }
+
         println!("[SwordEngine] Remote sources: {:?}", sources);
         sources
     }
@@ -123,8 +140,22 @@ impl SwordEngine {
         let mut modules = Vec::new();
         let c_source = CString::new(source_name).unwrap();
 
+        // Ensure the remote source directory exists
+        let remote_path = self
+            .sword_path
+            .join("InstallMgr")
+            .join("RemoteSources")
+            .join(source_name);
+        println!("[Step 2] Ensuring directory exists: {:?}", remote_path);
+        if let Err(e) = fs::create_dir_all(&remote_path) {
+            println!("[Step 2.1] WARNING: Failed to create directory: {}", e);
+        } else {
+            println!("[Step 2.2] Directory created/verified successfully");
+        }
+
         unsafe {
             // 1. Refresh (Downloads to temp)
+            println!("[Step 3] Refreshing remote source...");
             org_crosswire_sword_InstallMgr_setUserDisclaimerConfirmed(inner.install_mgr);
             org_crosswire_sword_InstallMgr_refreshRemoteSource(
                 inner.install_mgr,
@@ -140,20 +171,26 @@ impl SwordEngine {
             org_crosswire_sword_InstallMgr_syncConfig(inner.install_mgr);
 
             // --- DEBUG: Physical Check ---
-            let remote_path = self
-                .sword_path
-                .join("InstallMgr")
-                .join("RemoteSources")
-                .join(source_name);
             println!("[Step 5] Checking physical path: {:?}", remote_path);
             if remote_path.exists() {
                 if let Ok(entries) = fs::read_dir(&remote_path) {
+                    let mut count = 0;
                     for entry in entries.flatten() {
                         println!("[Step 5.1] Found file on disk: {:?}", entry.file_name());
+                        count += 1;
+                        if count > 5 { // Limit output
+                            println!("[Step 5.1] ... and more files");
+                            break;
+                        }
                     }
+                    if count == 0 {
+                        println!("[Step 5.2] Directory exists but is empty");
+                    }
+                } else {
+                    println!("[Step 5.3] Directory exists but cannot read contents");
                 }
             } else {
-                println!("[Step 5.2] WARNING: Folder still does not exist on disk!");
+                println!("[Step 5.4] WARNING: Folder still does not exist on disk!");
             }
 
             self.rebuild_mgr(&mut inner);
@@ -305,19 +342,41 @@ impl SwordEngine {
     // ------------------- INSTALL MODULE -------------------
 
     pub fn install_remote_module(&self, source: &str, module_name: &str) -> i32 {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
         let c_source = CString::new(source).unwrap();
         let c_mod = CString::new(module_name).unwrap();
 
         PROGRESS_TOTAL.store(0, Ordering::SeqCst);
         PROGRESS_COMPLETED.store(0, Ordering::SeqCst);
 
+        // Ensure the remote source directory exists and is refreshed
+        let remote_path = self
+            .sword_path
+            .join("InstallMgr")
+            .join("RemoteSources")
+            .join(source);
+        println!("[SwordEngine] Ensuring install directory exists: {:?}", remote_path);
+        if let Err(e) = fs::create_dir_all(&remote_path) {
+            println!("[SwordEngine] WARNING: Failed to create install directory: {}", e);
+        }
+
         unsafe {
             println!(
                 "[SwordEngine] Installing '{}' from '{}'",
                 module_name, source
             );
+
+            // Refresh the source before installation
             org_crosswire_sword_InstallMgr_setUserDisclaimerConfirmed(inner.install_mgr);
+            org_crosswire_sword_InstallMgr_refreshRemoteSource(
+                inner.install_mgr,
+                c_source.as_ptr(),
+            );
+
+            // Sync the refreshed data
+            org_crosswire_sword_InstallMgr_syncConfig(inner.install_mgr);
+
+            // Now attempt installation
             let res = org_crosswire_sword_InstallMgr_remoteInstallModule(
                 inner.install_mgr,
                 inner.mgr,
@@ -325,6 +384,13 @@ impl SwordEngine {
                 c_mod.as_ptr(),
             );
             println!("[SwordEngine] Install result: {}", res);
+
+            // If installation was successful, rebuild the SWMgr to see the new module
+            if res == 0 {
+                println!("[SwordEngine] Installation successful, rebuilding SWMgr to discover new module");
+                self.rebuild_mgr(&mut inner);
+            }
+
             res
         }
     }
@@ -456,11 +522,14 @@ impl SwordEngine {
 
         // 2. CRITICAL: Create the specific folder the InstallMgr uses for Remote Sources
         // If this isn't here, the 'syncConfig' download has nowhere to land.
-        let remote_sources = path
-            .join("InstallMgr")
-            .join("RemoteSources")
-            .join("CrossWire");
-        let _ = fs::create_dir_all(&remote_sources);
+        let sources = ["CrossWire", "Bible.org", "IBT", "ebible.org"];
+        for source in &sources {
+            let remote_sources = path
+                .join("InstallMgr")
+                .join("RemoteSources")
+                .join(source);
+            let _ = fs::create_dir_all(&remote_sources);
+        }
 
         let abs_path_str = path.to_string_lossy().replace("\\", "/");
         println!("absolute path: {}", abs_path_str);
@@ -479,6 +548,21 @@ Description=CrossWire HTTP
 Protocol=HTTP
 Source=www.crosswire.org
 Directory=/ftpmirror/pub/sword/raw
+[Remote:Bible.org]
+Description=Bible.org Repository
+Protocol=HTTP
+Source=ftp.bible.org
+Directory=/sword
+[Remote:IBT]
+Description=Institute for Bible Translation
+Protocol=HTTP
+Source=ibt.org.ru
+Directory=/sword
+[Remote:ebible.org]
+Description=eBible.org Repository
+Protocol=HTTP
+Source=ebible.org
+Directory=/sword
 "#,
             abs_path_str
         );
