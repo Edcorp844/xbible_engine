@@ -44,9 +44,28 @@ fn main() {
     let installed = engine.get_available_modules();
     println!("{} Bible modules found", installed.len());
     
+    // Show different types of modules separately
+    let commentaries = engine.get_commentary_modules();
+    println!("{} Commentary modules found", commentaries.len());
+    
+    let dictionaries = engine.get_dictionary_modules();
+    println!("{} Dictionary modules found", dictionaries.len());
+    
+    let glossaries = engine.get_glossary_modules();
+    println!("{} Glossary modules found", glossaries.len());
+    
+    let lexicons = engine.get_lexicon_modules();
+    println!("{} Lexicon modules found", lexicons.len());
+    
+    let devotionals = engine.get_daily_devotional_modules();
+    println!("{} Daily devotional modules found", devotionals.len());
+    
+    let books = engine.get_book_modules();
+    println!("{} Book modules found", books.len());
+    
     // Also show all modules including commentaries
     let all_modules = engine.refresh_installed_modules();
-    println!("Total modules available: {}", all_modules.len());
+    println!("\nTotal modules available: {}", all_modules.len());
     for module in &all_modules {
         println!("- {} [{}] {} ({})", module.name, module.category, module.language, module.version);
     }

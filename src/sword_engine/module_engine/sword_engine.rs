@@ -332,6 +332,54 @@ impl SwordEngine {
             .collect()
     }
 
+    /// Get glossary modules (simple word definitions)
+    pub fn get_glossary_modules(&self) -> Vec<SwordModule> {
+        self.get_modules()
+            .into_iter()
+            .filter(|m| {
+                let cat = m.category.to_lowercase();
+                let desc = m.description.to_lowercase();
+
+                // Glossaries typically have "gloss" in category or are simple dictionaries
+                cat.contains("gloss") ||
+                (cat.contains("dict") && !desc.contains("lexicon"))
+            })
+            .collect()
+    }
+
+    /// Get lexicon modules (detailed language study tools)
+    pub fn get_lexicon_modules(&self) -> Vec<SwordModule> {
+        self.get_modules()
+            .into_iter()
+            .filter(|m| {
+                let cat = m.category.to_lowercase();
+                let name = m.name.to_lowercase();
+                let desc = m.description.to_lowercase();
+
+                // Lexicons have "lex" in category or are Strong's dictionaries
+                cat.contains("lex") ||
+                name.contains("strong") ||
+                desc.contains("lexicon") ||
+                desc.contains("strong")
+            })
+            .collect()
+    }
+
+    /// Get daily devotional modules
+    pub fn get_daily_devotional_modules(&self) -> Vec<SwordModule> {
+        self.get_modules()
+            .into_iter()
+            .filter(|m| {
+                let cat = m.category.to_lowercase();
+                let desc = m.description.to_lowercase();
+
+                cat.contains("daily") ||
+                desc.contains("devotional") ||
+                desc.contains("daily")
+            })
+            .collect()
+    }
+
     pub fn get_book_modules(&self) -> Vec<SwordModule> {
         self.get_modules_by_category(vec!["Generic Books"])
     }

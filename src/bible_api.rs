@@ -95,6 +95,21 @@ impl BibleEngine {
         self.sword_engine.get_dictionary_modules()
     }
 
+    /// Get all glossary modules (simple word definitions)
+    pub fn get_glossary_modules(&self) -> Vec<SwordModule> {
+        self.sword_engine.get_glossary_modules()
+    }
+
+    /// Get all lexicon modules (detailed language study tools)
+    pub fn get_lexicon_modules(&self) -> Vec<SwordModule> {
+        self.sword_engine.get_lexicon_modules()
+    }
+
+    /// Get all daily devotional modules
+    pub fn get_daily_devotional_modules(&self) -> Vec<SwordModule> {
+        self.sword_engine.get_daily_devotional_modules()
+    }
+
     /// Get all book modules (devotional books, etc.)
     pub fn get_book_modules(&self) -> Vec<SwordModule> {
         self.sword_engine.get_book_modules()
