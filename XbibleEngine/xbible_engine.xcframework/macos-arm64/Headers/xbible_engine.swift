@@ -550,6 +550,12 @@ public protocol BibleEngineProtocol: AnyObject, Sendable {
     func fetchModulesAsync(sourceName: String)  -> String
     
     /**
+     * Fetch available modules from multiple remote sources in parallel (Asynchronous)
+     * Returns a TaskID for tracking progress
+     */
+    func fetchMultipleSourcesAsync(sources: [String])  -> String
+    
+    /**
      * Fetch available modules from a remote source
      */
     func fetchRemoteModules(sourceName: String)  -> [SwordModule]
@@ -814,6 +820,19 @@ open func fetchModulesAsync(sourceName: String) -> String  {
     uniffi_xbible_engine_fn_method_bibleengine_fetch_modules_async(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(sourceName),$0
+    )
+})
+}
+    
+    /**
+     * Fetch available modules from multiple remote sources in parallel (Asynchronous)
+     * Returns a TaskID for tracking progress
+     */
+open func fetchMultipleSourcesAsync(sources: [String]) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_fetch_multiple_sources_async(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(sources),$0
     )
 })
 }
@@ -2463,6 +2482,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_xbible_engine_checksum_method_bibleengine_fetch_modules_async() != 182) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_fetch_multiple_sources_async() != 46784) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_xbible_engine_checksum_method_bibleengine_fetch_remote_modules() != 41165) {

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::collections::HashMap;
 use std::thread;
+use std::time::Duration;
 use crate::sword_engine::module_engine::{sword_engine::SwordEngine, sword_module::{SwordModule, ModuleBook}};
 /// Download progress details for module installation
 #[derive(Debug, Clone, uniffi::Record)]
@@ -82,6 +83,12 @@ impl BibleEngine {
     /// Fetch available modules from a remote source (Asynchronous)
     /// Returns a TaskID for tracking progress
     pub fn fetch_modules_async(&self, source_name: String) -> String {
+        self.fetch_multiple_sources_async(vec![source_name])
+    }
+
+    /// Fetch available modules from multiple remote sources in parallel (Asynchronous)
+    /// Returns a TaskID for tracking progress
+    pub fn fetch_multiple_sources_async(&self, sources: Vec<String>) -> String {
         let mut id_lock = self.next_task_id.lock().unwrap();
         let task_id = format!("task_{}", *id_lock);
         *id_lock += 1;
@@ -92,17 +99,45 @@ impl BibleEngine {
                 task_id: task_id.clone(),
                 state: TaskState::Running,
                 progress: 0.0,
-                message: "Fetching modules...".to_string(),
+                message: format!("Preparing to fetch from {} sources...", sources.len()),
             },
             result_modules: Vec::new(),
         });
 
         let task_id_clone = task_id.clone();
         let tasks_clone = self.tasks.clone();
-        let engine_clone = self.sword_engine.clone();
+        let sword_engine = self.sword_engine.clone();
 
         thread::spawn(move || {
-            let modules = engine_clone.fetch_remote_modules(&source_name);
+            let total_sources = sources.len();
+            let mut all_modules = Vec::new();
+            let mut handles = Vec::new();
+
+            // Spawn a thread for each source for true parallel fetching
+            for source in sources {
+                let se = sword_engine.clone();
+                let s = source.clone();
+                handles.push(thread::spawn(move || {
+                    se.fetch_remote_modules(&s)
+                }));
+            }
+
+            // Wait for all fetches and update progress incrementally
+            let mut completed = 0;
+            for handle in handles {
+                if let Ok(mods) = handle.join() {
+                    all_modules.extend(mods);
+                }
+                completed += 1;
+                
+                let mut tasks = tasks_clone.lock().unwrap();
+                if let Some(task) = tasks.get_mut(&task_id_clone) {
+                    if let TaskState::Running = task.status.state {
+                        task.status.progress = completed as f64 / total_sources as f64;
+                        task.status.message = format!("Fetched {}/{} sources...", completed, total_sources);
+                    }
+                }
+            }
             
             let mut tasks = tasks_clone.lock().unwrap();
             if let Some(task) = tasks.get_mut(&task_id_clone) {
@@ -111,8 +146,8 @@ impl BibleEngine {
                 }
                 task.status.state = TaskState::Completed;
                 task.status.progress = 1.0;
-                task.status.message = format!("Fetched {} modules", modules.len());
-                task.result_modules = modules;
+                task.status.message = format!("Fetched {} modules from {} sources", all_modules.len(), total_sources);
+                task.result_modules = all_modules;
             }
         });
 
@@ -154,7 +189,35 @@ impl BibleEngine {
         let engine_clone = self.sword_engine.clone();
 
         thread::spawn(move || {
-            let res = engine_clone.install_remote_module(&source, &module_name);
+            // Use a separate thread for the blocking install call so we can poll progress
+            let engine_for_install = engine_clone.clone();
+            let source_for_install = source.clone();
+            let module_for_install = module_name.clone();
+            
+            let install_handle = thread::spawn(move || {
+                engine_for_install.install_remote_module(&source_for_install, &module_for_install)
+            });
+
+            // Poll progress until the install thread finishes
+            while !install_handle.is_finished() {
+                let current_progress = engine_clone.get_download_progress();
+                
+                let mut tasks = tasks_clone.lock().unwrap();
+                if let Some(task) = tasks.get_mut(&task_id_clone) {
+                    // Only update if not already failed/cancelled
+                    if let TaskState::Running = task.status.state {
+                        task.status.progress = current_progress;
+                        task.status.message = format!("Downloading {}: {:.1}%", module_name, current_progress * 100.0);
+                    } else {
+                        // Task was cancelled or failed by another thread
+                        break;
+                    }
+                }
+                drop(tasks);
+                thread::sleep(Duration::from_millis(250));
+            }
+
+            let res = install_handle.join().unwrap_or(-1);
             
             let mut tasks = tasks_clone.lock().unwrap();
             if let Some(task) = tasks.get_mut(&task_id_clone) {

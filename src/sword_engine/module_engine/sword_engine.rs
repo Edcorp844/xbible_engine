@@ -135,70 +135,33 @@ impl SwordEngine {
     }
 
     pub fn fetch_remote_modules(&self, source_name: &str) -> Vec<SwordModule> {
-        println!("\n[Step 1] Locking Engine...");
-        let mut inner = self.inner.lock().unwrap();
         let mut modules = Vec::new();
         let c_source = CString::new(source_name).unwrap();
-
-        // Ensure the remote source directory exists
-        let remote_path = self
-            .sword_path
-            .join("InstallMgr")
-            .join("RemoteSources")
-            .join(source_name);
-        println!("[Step 2] Ensuring directory exists: {:?}", remote_path);
-        if let Err(e) = fs::create_dir_all(&remote_path) {
-            println!("[Step 2.1] WARNING: Failed to create directory: {}", e);
-        } else {
-            println!("[Step 2.2] Directory created/verified successfully");
-        }
+        
+        let path_str = self.sword_path.to_string_lossy().replace("\\", "/");
+        let c_path = CString::new(path_str).unwrap();
 
         unsafe {
+            // Create local, temporary handles for this fetch task.
+            // This allows us to perform multiple fetches in parallel without locking the global engine.
+            let local_install_mgr = org_crosswire_sword_InstallMgr_new(c_path.as_ptr(), None);
+            let local_mgr = org_crosswire_sword_SWMgr_newWithPath(c_path.as_ptr());
+
             // 1. Refresh (Downloads to temp)
-            println!("[Step 3] Refreshing remote source...");
-            org_crosswire_sword_InstallMgr_setUserDisclaimerConfirmed(inner.install_mgr);
+            org_crosswire_sword_InstallMgr_setUserDisclaimerConfirmed(local_install_mgr);
             org_crosswire_sword_InstallMgr_refreshRemoteSource(
-                inner.install_mgr,
+                local_install_mgr,
                 c_source.as_ptr(),
             );
 
             // 2. Sync (Moves from temp to InstallMgr/RemoteSources)
-            println!("[Step 4] Syncing...");
-            org_crosswire_sword_InstallMgr_syncConfig(inner.install_mgr);
+            org_crosswire_sword_InstallMgr_syncConfig(local_install_mgr);
+            org_crosswire_sword_InstallMgr_syncConfig(local_install_mgr);
 
-            // 3. Re-syncing and Re-confirming (Forces the internal cache to update)
-            org_crosswire_sword_InstallMgr_setUserDisclaimerConfirmed(inner.install_mgr);
-            org_crosswire_sword_InstallMgr_syncConfig(inner.install_mgr);
-
-            // --- DEBUG: Physical Check ---
-            println!("[Step 5] Checking physical path: {:?}", remote_path);
-            if remote_path.exists() {
-                if let Ok(entries) = fs::read_dir(&remote_path) {
-                    let mut count = 0;
-                    for entry in entries.flatten() {
-                        println!("[Step 5.1] Found file on disk: {:?}", entry.file_name());
-                        count += 1;
-                        if count > 5 { // Limit output
-                            println!("[Step 5.1] ... and more files");
-                            break;
-                        }
-                    }
-                    if count == 0 {
-                        println!("[Step 5.2] Directory exists but is empty");
-                    }
-                } else {
-                    println!("[Step 5.3] Directory exists but cannot read contents");
-                }
-            } else {
-                println!("[Step 5.4] WARNING: Folder still does not exist on disk!");
-            }
-
-            self.rebuild_mgr(&mut inner);
-
-            println!("[Step 6] Final Query...");
+            // 3. Query the remote list
             let info_ptr = org_crosswire_sword_InstallMgr_getRemoteModInfoList(
-                inner.install_mgr,
-                inner.mgr,
+                local_install_mgr,
+                local_mgr,
                 c_source.as_ptr(),
             );
 
@@ -210,15 +173,14 @@ impl SwordEngine {
                         break;
                     }
                     let mut features_vec = Vec::new();
-                    let feature_ptr_ptr = (*entry).features; // *mut *const c_char
+                    let feature_ptr_ptr = (*entry).features;
 
                     if !feature_ptr_ptr.is_null() {
-                        let mut i = 0;
-                        // Loop until the pointer at the current offset is null
-                        while !(*feature_ptr_ptr.offset(i)).is_null() {
-                            let feature_c_str = CStr::from_ptr(*feature_ptr_ptr.offset(i));
+                        let mut j = 0;
+                        while !(*feature_ptr_ptr.offset(j)).is_null() {
+                            let feature_c_str = CStr::from_ptr(*feature_ptr_ptr.offset(j));
                             features_vec.push(feature_c_str.to_string_lossy().into_owned());
-                            i += 1;
+                            j += 1;
                         }
                     }
 
@@ -235,10 +197,11 @@ impl SwordEngine {
                     });
                     i += 1;
                 }
-                println!("[Step 9] SUCCESS: Found {} modules", modules.len());
-            } else {
-                println!("[Step 7] Still NULL. API is failing to read its own files.");
             }
+
+            // Cleanup local handles
+            org_crosswire_sword_SWMgr_delete(local_mgr);
+            org_crosswire_sword_InstallMgr_delete(local_install_mgr);
         }
         modules
     }
@@ -392,52 +355,54 @@ impl SwordEngine {
     // ------------------- INSTALL MODULE -------------------
 
     pub fn install_remote_module(&self, source: &str, module_name: &str) -> i32 {
-        let mut inner = self.inner.lock().unwrap();
         let c_source = CString::new(source).unwrap();
         let c_mod = CString::new(module_name).unwrap();
 
         PROGRESS_TOTAL.store(0, Ordering::SeqCst);
         PROGRESS_COMPLETED.store(0, Ordering::SeqCst);
 
-        // Ensure the remote source directory exists and is refreshed
-        let remote_path = self
-            .sword_path
-            .join("InstallMgr")
-            .join("RemoteSources")
-            .join(source);
-        println!("[SwordEngine] Ensuring install directory exists: {:?}", remote_path);
-        if let Err(e) = fs::create_dir_all(&remote_path) {
-            println!("[SwordEngine] WARNING: Failed to create install directory: {}", e);
-        }
+        let path_str = self.sword_path.to_string_lossy().replace("\\", "/");
+        let c_path = CString::new(path_str).unwrap();
 
         unsafe {
+            // Create local, temporary handles for the installation.
+            // This avoids blocking the main engine's Mutex during the long download/extract process,
+            // allowing the user to keep reading their Bible while a module installs.
+            let local_install_mgr = org_crosswire_sword_InstallMgr_new(c_path.as_ptr(), Some(Self::status_reporter));
+            let local_mgr = org_crosswire_sword_SWMgr_newWithPath(c_path.as_ptr());
+
             println!(
-                "[SwordEngine] Installing '{}' from '{}'",
+                "[SwordEngine] Installing '{}' from '{}' (Background)",
                 module_name, source
             );
 
-            // Refresh the source before installation
-            org_crosswire_sword_InstallMgr_setUserDisclaimerConfirmed(inner.install_mgr);
+            // 1. Refresh the source before installation
+            org_crosswire_sword_InstallMgr_setUserDisclaimerConfirmed(local_install_mgr);
             org_crosswire_sword_InstallMgr_refreshRemoteSource(
-                inner.install_mgr,
+                local_install_mgr,
                 c_source.as_ptr(),
             );
 
-            // Sync the refreshed data
-            org_crosswire_sword_InstallMgr_syncConfig(inner.install_mgr);
+            // 2. Sync the refreshed data
+            org_crosswire_sword_InstallMgr_syncConfig(local_install_mgr);
 
-            // Now attempt installation
+            // 3. Now attempt installation using local handles
             let res = org_crosswire_sword_InstallMgr_remoteInstallModule(
-                inner.install_mgr,
-                inner.mgr,
+                local_install_mgr,
+                local_mgr,
                 c_source.as_ptr(),
                 c_mod.as_ptr(),
             );
             println!("[SwordEngine] Install result: {}", res);
 
-            // If installation was successful, rebuild the SWMgr to see the new module
+            // 4. Cleanup local handles
+            org_crosswire_sword_SWMgr_delete(local_mgr);
+            org_crosswire_sword_InstallMgr_delete(local_install_mgr);
+
+            // 5. If installation was successful, lock the main engine ONLY to rebuild it
             if res == 0 {
-                println!("[SwordEngine] Installation successful, rebuilding SWMgr to discover new module");
+                println!("[SwordEngine] Installation successful, refreshing main engine awareness");
+                let mut inner = self.inner.lock().unwrap();
                 self.rebuild_mgr(&mut inner);
             }
 
