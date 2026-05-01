@@ -1,6 +1,8 @@
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::collections::HashMap;
+use std::thread;
 use crate::sword_engine::module_engine::{sword_engine::SwordEngine, sword_module::{SwordModule, ModuleBook}};
-
 /// Download progress details for module installation
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct DownloadProgress {
@@ -24,11 +26,34 @@ pub struct EngineGlobalOption {
     pub name: String,             
     pub state: String,        
 }
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum TaskState {
+    Queued,
+    Running,
+    Completed,
+    Failed { error: String },
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct TaskStatus {
+    pub task_id: String,
+    pub state: TaskState,
+    pub progress: f64,
+    pub message: String,
+}
+
+pub struct TaskData {
+    status: TaskStatus,
+    result_modules: Vec<SwordModule>,
+}
+
 /// High-level Bible API abstraction layer for UniFFI export
 /// Provides a clean interface for Swift and other languages to interact with Bible modules
 #[derive(uniffi::Object)]
 pub struct BibleEngine {
     sword_engine: Arc<SwordEngine>,
+    tasks: Arc<Mutex<HashMap<String, TaskData>>>,
+    next_task_id: Arc<Mutex<u64>>,
 }
 
 #[uniffi::export]
@@ -38,7 +63,149 @@ impl BibleEngine {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             sword_engine: SwordEngine::new(),
+            tasks: Arc::new(Mutex::new(HashMap::new())),
+            next_task_id: Arc::new(Mutex::new(1)),
         })
+    }
+
+    /// Cancel a background task
+    pub fn cancel_task(&self, task_id: String) {
+        let mut tasks = self.tasks.lock().unwrap();
+        if let Some(task) = tasks.get_mut(&task_id) {
+            if matches!(task.status.state, TaskState::Queued | TaskState::Running) {
+                task.status.state = TaskState::Failed { error: "Cancelled".to_string() };
+                task.status.message = "Task cancelled".to_string();
+            }
+        }
+    }
+
+    /// Fetch available modules from a remote source (Asynchronous)
+    /// Returns a TaskID for tracking progress
+    pub fn fetch_modules_async(&self, source_name: String) -> String {
+        let mut id_lock = self.next_task_id.lock().unwrap();
+        let task_id = format!("task_{}", *id_lock);
+        *id_lock += 1;
+
+        let mut tasks = self.tasks.lock().unwrap();
+        tasks.insert(task_id.clone(), TaskData {
+            status: TaskStatus {
+                task_id: task_id.clone(),
+                state: TaskState::Running,
+                progress: 0.0,
+                message: "Fetching modules...".to_string(),
+            },
+            result_modules: Vec::new(),
+        });
+
+        let task_id_clone = task_id.clone();
+        let tasks_clone = self.tasks.clone();
+        let engine_clone = self.sword_engine.clone();
+
+        thread::spawn(move || {
+            let modules = engine_clone.fetch_remote_modules(&source_name);
+            
+            let mut tasks = tasks_clone.lock().unwrap();
+            if let Some(task) = tasks.get_mut(&task_id_clone) {
+                if let TaskState::Failed { .. } = task.status.state {
+                    return;
+                }
+                task.status.state = TaskState::Completed;
+                task.status.progress = 1.0;
+                task.status.message = format!("Fetched {} modules", modules.len());
+                task.result_modules = modules;
+            }
+        });
+
+        task_id
+    }
+
+    /// Get the status of a background task
+    pub fn get_task_status(&self, task_id: String) -> Option<TaskStatus> {
+        let tasks = self.tasks.lock().unwrap();
+        tasks.get(&task_id).map(|t| t.status.clone())
+    }
+
+    /// Get the modules resulting from a fetch task
+    pub fn get_task_result_modules(&self, task_id: String) -> Vec<SwordModule> {
+        let tasks = self.tasks.lock().unwrap();
+        tasks.get(&task_id).map(|t| t.result_modules.clone()).unwrap_or_default()
+    }
+
+    /// Install a remote module from a source (Asynchronous)
+    /// Returns a TaskID for tracking progress
+    pub fn install_module_async(&self, source: String, module_name: String) -> String {
+        let mut id_lock = self.next_task_id.lock().unwrap();
+        let task_id = format!("task_{}", *id_lock);
+        *id_lock += 1;
+
+        let mut tasks = self.tasks.lock().unwrap();
+        tasks.insert(task_id.clone(), TaskData {
+            status: TaskStatus {
+                task_id: task_id.clone(),
+                state: TaskState::Running,
+                progress: 0.0,
+                message: format!("Installing {}...", module_name),
+            },
+            result_modules: Vec::new(),
+        });
+
+        let task_id_clone = task_id.clone();
+        let tasks_clone = self.tasks.clone();
+        let engine_clone = self.sword_engine.clone();
+
+        thread::spawn(move || {
+            let res = engine_clone.install_remote_module(&source, &module_name);
+            
+            let mut tasks = tasks_clone.lock().unwrap();
+            if let Some(task) = tasks.get_mut(&task_id_clone) {
+                if let TaskState::Failed { .. } = task.status.state {
+                    return;
+                }
+                if res == 0 {
+                    task.status.state = TaskState::Completed;
+                    task.status.progress = 1.0;
+                    task.status.message = format!("Successfully installed {}", module_name);
+                } else {
+                    task.status.state = TaskState::Failed { error: format!("Install failed with code {}", res) };
+                    task.status.message = format!("Failed to install {}", module_name);
+                }
+            }
+        });
+
+        task_id
+    }
+
+    /// Get all available module categories
+    pub fn get_available_categories(&self) -> Vec<String> {
+        let mut categories: Vec<String> = self.sword_engine.get_modules().into_iter().map(|m| m.category).collect();
+        categories.sort();
+        categories.dedup();
+        categories
+    }
+
+    /// Get all Bible modules (alias for get_available_modules for clarity)
+    pub fn get_bible_modules(&self) -> Vec<SwordModule> {
+        self.sword_engine.get_bible_modules()
+    }
+
+    /// Get all cult/religion study modules
+    pub fn get_cult_modules(&self) -> Vec<SwordModule> {
+        self.sword_engine.get_modules_by_category(vec!["Cults / Unorthodox / Questionable Material"])
+    }
+
+    /// Get all essay modules (theological essays and articles)
+    pub fn get_essay_modules(&self) -> Vec<SwordModule> {
+        self.sword_engine.get_modules_by_category(vec!["Essays"])
+    }
+
+    /// Get all image modules (illustrations and artwork)
+    pub fn get_image_modules(&self) -> Vec<SwordModule> {
+        self.sword_engine.get_modules_by_category(vec!["Images"])
+    }
+
+    /// Get all map modules
+    pub fn get_map_modules(&self) -> Vec<SwordModule> {
+        self.sword_engine.get_map_modules()
     }
 
     //set engine global options to get a module
@@ -192,12 +359,7 @@ impl BibleEngine {
         }
     }
 
-    /// Install a remote module from a source with detailed progress tracking
-    /// Returns 0 on success, non-zero error code on failure
-    pub fn install_module_with_progress(&self, source: &str, module_name: &str) -> i32 {
-        println!("[BibleEngine] Starting installation of {} from {}", module_name, source);
-        self.sword_engine.install_remote_module(source, module_name)
-    }
+
 
     /// Refresh the list of installed modules
     pub fn refresh_installed_modules(&self) -> Vec<SwordModule> {
@@ -225,9 +387,10 @@ impl BibleEngine {
     }
 
     /// Get information about a specific remote module
-    pub fn get_remote_module_info(&self, source_name: &str, module_name: &str) -> Option<SwordModule> {
+    /// Returns a TaskID for tracking progress
+    pub fn get_remote_module_info(&self, source_name: &str, module_name: &str) -> Vec<SwordModule> {
         let modules = self.sword_engine.fetch_remote_modules(source_name);
-        modules.into_iter().find(|m| m.name == module_name)
+        modules.into_iter().filter(|m| m.name == module_name).collect()
     }
 
     /// Search for modules matching a query across all sources

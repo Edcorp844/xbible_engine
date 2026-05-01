@@ -19,6 +19,7 @@ pub struct SwordModule {
     pub description: String,
     pub category: String,
     pub language: String,
+    pub source: String,
     pub version: String,
     pub delta: String,
     pub cipher_key: String,

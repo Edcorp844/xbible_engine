@@ -539,14 +539,35 @@ fileprivate struct FfiConverterString: FfiConverter {
 public protocol BibleEngineProtocol: AnyObject, Sendable {
     
     /**
+     * Cancel a background task
+     */
+    func cancelTask(taskId: String) 
+    
+    /**
+     * Fetch available modules from a remote source (Asynchronous)
+     * Returns a TaskID for tracking progress
+     */
+    func fetchModulesAsync(sourceName: String)  -> String
+    
+    /**
      * Fetch available modules from a remote source
      */
     func fetchRemoteModules(sourceName: String)  -> [SwordModule]
     
     /**
+     * Get all available module categories
+     */
+    func getAvailableCategories()  -> [String]
+    
+    /**
      * Get all available Bible modules
      */
     func getAvailableModules()  -> [SwordModule]
+    
+    /**
+     * Get all Bible modules (alias for get_available_modules for clarity)
+     */
+    func getBibleModules()  -> [SwordModule]
     
     /**
      * Get all book modules (devotional books, etc.)
@@ -576,6 +597,16 @@ public protocol BibleEngineProtocol: AnyObject, Sendable {
     func getContent(moduleName: String, reference: String)  -> [Section]
     
     /**
+     * Get all cult/religion study modules
+     */
+    func getCultModules()  -> [SwordModule]
+    
+    /**
+     * Get all daily devotional modules
+     */
+    func getDailyDevotionalModules()  -> [SwordModule]
+    
+    /**
      * Get all dictionary modules
      */
     func getDictionaryModules()  -> [SwordModule]
@@ -591,6 +622,21 @@ public protocol BibleEngineProtocol: AnyObject, Sendable {
     func getDownloadProgressDetails()  -> DownloadProgress
     
     /**
+     * Get all essay modules (theological essays and articles)
+     */
+    func getEssayModules()  -> [SwordModule]
+    
+    /**
+     * Get all glossary modules (simple word definitions)
+     */
+    func getGlossaryModules()  -> [SwordModule]
+    
+    /**
+     * Get all image modules (illustrations and artwork)
+     */
+    func getImageModules()  -> [SwordModule]
+    
+    /**
      * Get installed modules by category
      */
     func getInstalledModulesByCategory(category: String)  -> [SwordModule]
@@ -601,14 +647,25 @@ public protocol BibleEngineProtocol: AnyObject, Sendable {
     func getInstalledModulesSize()  -> Int64
     
     /**
+     * Get all lexicon modules (detailed language study tools)
+     */
+    func getLexiconModules()  -> [SwordModule]
+    
+    /**
+     * Get all map modules
+     */
+    func getMapModules()  -> [SwordModule]
+    
+    /**
      * Get modules by language
      */
     func getModulesByLanguage(languageCode: String, sourceName: String)  -> [SwordModule]
     
     /**
      * Get information about a specific remote module
+     * Returns a TaskID for tracking progress
      */
-    func getRemoteModuleInfo(sourceName: String, moduleName: String)  -> SwordModule?
+    func getRemoteModuleInfo(sourceName: String, moduleName: String)  -> [SwordModule]
     
     /**
      * Get list of remote sources
@@ -631,16 +688,26 @@ public protocol BibleEngineProtocol: AnyObject, Sendable {
     func getSourceUrl(source: String)  -> String
     
     /**
+     * Get the modules resulting from a fetch task
+     */
+    func getTaskResultModules(taskId: String)  -> [SwordModule]
+    
+    /**
+     * Get the status of a background task
+     */
+    func getTaskStatus(taskId: String)  -> TaskStatus?
+    
+    /**
      * Install a remote module from a source
      * Returns 0 on success, non-zero error code on failure
      */
     func installModule(source: String, moduleName: String)  -> Int32
     
     /**
-     * Install a remote module from a source with detailed progress tracking
-     * Returns 0 on success, non-zero error code on failure
+     * Install a remote module from a source (Asynchronous)
+     * Returns a TaskID for tracking progress
      */
-    func installModuleWithProgress(source: String, moduleName: String)  -> Int32
+    func installModuleAsync(source: String, moduleName: String)  -> String
     
     /**
      * Check if a module is installed
@@ -728,6 +795,30 @@ public convenience init() {
 
     
     /**
+     * Cancel a background task
+     */
+open func cancelTask(taskId: String)  {try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_cancel_task(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(taskId),$0
+    )
+}
+}
+    
+    /**
+     * Fetch available modules from a remote source (Asynchronous)
+     * Returns a TaskID for tracking progress
+     */
+open func fetchModulesAsync(sourceName: String) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_fetch_modules_async(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sourceName),$0
+    )
+})
+}
+    
+    /**
      * Fetch available modules from a remote source
      */
 open func fetchRemoteModules(sourceName: String) -> [SwordModule]  {
@@ -740,11 +831,33 @@ open func fetchRemoteModules(sourceName: String) -> [SwordModule]  {
 }
     
     /**
+     * Get all available module categories
+     */
+open func getAvailableCategories() -> [String]  {
+    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_available_categories(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
      * Get all available Bible modules
      */
 open func getAvailableModules() -> [SwordModule]  {
     return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
     uniffi_xbible_engine_fn_method_bibleengine_get_available_modules(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Get all Bible modules (alias for get_available_modules for clarity)
+     */
+open func getBibleModules() -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_bible_modules(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -813,6 +926,28 @@ open func getContent(moduleName: String, reference: String) -> [Section]  {
 }
     
     /**
+     * Get all cult/religion study modules
+     */
+open func getCultModules() -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_cult_modules(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Get all daily devotional modules
+     */
+open func getDailyDevotionalModules() -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_daily_devotional_modules(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
      * Get all dictionary modules
      */
 open func getDictionaryModules() -> [SwordModule]  {
@@ -846,6 +981,39 @@ open func getDownloadProgressDetails() -> DownloadProgress  {
 }
     
     /**
+     * Get all essay modules (theological essays and articles)
+     */
+open func getEssayModules() -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_essay_modules(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Get all glossary modules (simple word definitions)
+     */
+open func getGlossaryModules() -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_glossary_modules(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Get all image modules (illustrations and artwork)
+     */
+open func getImageModules() -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_image_modules(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
      * Get installed modules by category
      */
 open func getInstalledModulesByCategory(category: String) -> [SwordModule]  {
@@ -869,6 +1037,28 @@ open func getInstalledModulesSize() -> Int64  {
 }
     
     /**
+     * Get all lexicon modules (detailed language study tools)
+     */
+open func getLexiconModules() -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_lexicon_modules(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Get all map modules
+     */
+open func getMapModules() -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_map_modules(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
      * Get modules by language
      */
 open func getModulesByLanguage(languageCode: String, sourceName: String) -> [SwordModule]  {
@@ -883,9 +1073,10 @@ open func getModulesByLanguage(languageCode: String, sourceName: String) -> [Swo
     
     /**
      * Get information about a specific remote module
+     * Returns a TaskID for tracking progress
      */
-open func getRemoteModuleInfo(sourceName: String, moduleName: String) -> SwordModule?  {
-    return try!  FfiConverterOptionTypeSwordModule.lift(try! rustCall() {
+open func getRemoteModuleInfo(sourceName: String, moduleName: String) -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
     uniffi_xbible_engine_fn_method_bibleengine_get_remote_module_info(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(sourceName),
@@ -941,6 +1132,30 @@ open func getSourceUrl(source: String) -> String  {
 }
     
     /**
+     * Get the modules resulting from a fetch task
+     */
+open func getTaskResultModules(taskId: String) -> [SwordModule]  {
+    return try!  FfiConverterSequenceTypeSwordModule.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_task_result_modules(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(taskId),$0
+    )
+})
+}
+    
+    /**
+     * Get the status of a background task
+     */
+open func getTaskStatus(taskId: String) -> TaskStatus?  {
+    return try!  FfiConverterOptionTypeTaskStatus.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_get_task_status(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(taskId),$0
+    )
+})
+}
+    
+    /**
      * Install a remote module from a source
      * Returns 0 on success, non-zero error code on failure
      */
@@ -955,12 +1170,12 @@ open func installModule(source: String, moduleName: String) -> Int32  {
 }
     
     /**
-     * Install a remote module from a source with detailed progress tracking
-     * Returns 0 on success, non-zero error code on failure
+     * Install a remote module from a source (Asynchronous)
+     * Returns a TaskID for tracking progress
      */
-open func installModuleWithProgress(source: String, moduleName: String) -> Int32  {
-    return try!  FfiConverterInt32.lift(try! rustCall() {
-    uniffi_xbible_engine_fn_method_bibleengine_install_module_with_progress(
+open func installModuleAsync(source: String, moduleName: String) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_xbible_engine_fn_method_bibleengine_install_module_async(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(source),
         FfiConverterString.lower(moduleName),$0
@@ -1477,6 +1692,7 @@ public struct SwordModule: Equatable, Hashable {
     public var description: String
     public var category: String
     public var language: String
+    public var source: String
     public var version: String
     public var delta: String
     public var cipherKey: String
@@ -1484,11 +1700,12 @@ public struct SwordModule: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(name: String, description: String, category: String, language: String, version: String, delta: String, cipherKey: String, features: [String]) {
+    public init(name: String, description: String, category: String, language: String, source: String, version: String, delta: String, cipherKey: String, features: [String]) {
         self.name = name
         self.description = description
         self.category = category
         self.language = language
+        self.source = source
         self.version = version
         self.delta = delta
         self.cipherKey = cipherKey
@@ -1515,6 +1732,7 @@ public struct FfiConverterTypeSwordModule: FfiConverterRustBuffer {
                 description: FfiConverterString.read(from: &buf), 
                 category: FfiConverterString.read(from: &buf), 
                 language: FfiConverterString.read(from: &buf), 
+                source: FfiConverterString.read(from: &buf), 
                 version: FfiConverterString.read(from: &buf), 
                 delta: FfiConverterString.read(from: &buf), 
                 cipherKey: FfiConverterString.read(from: &buf), 
@@ -1527,6 +1745,7 @@ public struct FfiConverterTypeSwordModule: FfiConverterRustBuffer {
         FfiConverterString.write(value.description, into: &buf)
         FfiConverterString.write(value.category, into: &buf)
         FfiConverterString.write(value.language, into: &buf)
+        FfiConverterString.write(value.source, into: &buf)
         FfiConverterString.write(value.version, into: &buf)
         FfiConverterString.write(value.delta, into: &buf)
         FfiConverterString.write(value.cipherKey, into: &buf)
@@ -1547,6 +1766,68 @@ public func FfiConverterTypeSwordModule_lift(_ buf: RustBuffer) throws -> SwordM
 #endif
 public func FfiConverterTypeSwordModule_lower(_ value: SwordModule) -> RustBuffer {
     return FfiConverterTypeSwordModule.lower(value)
+}
+
+
+public struct TaskStatus: Equatable, Hashable {
+    public var taskId: String
+    public var state: TaskState
+    public var progress: Double
+    public var message: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(taskId: String, state: TaskState, progress: Double, message: String) {
+        self.taskId = taskId
+        self.state = state
+        self.progress = progress
+        self.message = message
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TaskStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTaskStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TaskStatus {
+        return
+            try TaskStatus(
+                taskId: FfiConverterString.read(from: &buf), 
+                state: FfiConverterTypeTaskState.read(from: &buf), 
+                progress: FfiConverterDouble.read(from: &buf), 
+                message: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TaskStatus, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.taskId, into: &buf)
+        FfiConverterTypeTaskState.write(value.state, into: &buf)
+        FfiConverterDouble.write(value.progress, into: &buf)
+        FfiConverterString.write(value.message, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTaskStatus_lift(_ buf: RustBuffer) throws -> TaskStatus {
+    return try FfiConverterTypeTaskStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTaskStatus_lower(_ value: TaskStatus) -> RustBuffer {
+    return FfiConverterTypeTaskStatus.lower(value)
 }
 
 
@@ -1708,6 +1989,90 @@ public func FfiConverterTypeWord_lower(_ value: Word) -> RustBuffer {
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
+public enum TaskState: Equatable, Hashable {
+    
+    case queued
+    case running
+    case completed
+    case failed(error: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension TaskState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTaskState: FfiConverterRustBuffer {
+    typealias SwiftType = TaskState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TaskState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .queued
+        
+        case 2: return .running
+        
+        case 3: return .completed
+        
+        case 4: return .failed(error: try FfiConverterString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: TaskState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .queued:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .running:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .completed:
+            writeInt(&buf, Int32(3))
+        
+        
+        case let .failed(error):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(error, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTaskState_lift(_ buf: RustBuffer) throws -> TaskState {
+    return try FfiConverterTypeTaskState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTaskState_lower(_ value: TaskState) -> RustBuffer {
+    return FfiConverterTypeTaskState.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 public enum TextDirection: Equatable, Hashable {
     
     case rtl
@@ -1823,8 +2188,8 @@ fileprivate struct FfiConverterOptionTypeLexicalInfo: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterOptionTypeSwordModule: FfiConverterRustBuffer {
-    typealias SwiftType = SwordModule?
+fileprivate struct FfiConverterOptionTypeTaskStatus: FfiConverterRustBuffer {
+    typealias SwiftType = TaskStatus?
 
     public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
         guard let value = value else {
@@ -1832,13 +2197,13 @@ fileprivate struct FfiConverterOptionTypeSwordModule: FfiConverterRustBuffer {
             return
         }
         writeInt(&buf, Int8(1))
-        FfiConverterTypeSwordModule.write(value, into: &buf)
+        FfiConverterTypeTaskStatus.write(value, into: &buf)
     }
 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
-        case 1: return try FfiConverterTypeSwordModule.read(from: &buf)
+        case 1: return try FfiConverterTypeTaskStatus.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -2094,10 +2459,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_xbible_engine_checksum_func_make_sentence() != 47495) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_cancel_task() != 28996) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_fetch_modules_async() != 182) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_xbible_engine_checksum_method_bibleengine_fetch_remote_modules() != 41165) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_available_categories() != 43375) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_xbible_engine_checksum_method_bibleengine_get_available_modules() != 6470) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_bible_modules() != 15399) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_xbible_engine_checksum_method_bibleengine_get_book_modules() != 3411) {
@@ -2115,6 +2492,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_xbible_engine_checksum_method_bibleengine_get_content() != 6151) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_cult_modules() != 40308) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_daily_devotional_modules() != 21884) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_xbible_engine_checksum_method_bibleengine_get_dictionary_modules() != 60555) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2124,16 +2507,31 @@ private let initializationResult: InitializationResult = {
     if (uniffi_xbible_engine_checksum_method_bibleengine_get_download_progress_details() != 46458) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_essay_modules() != 50449) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_glossary_modules() != 55934) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_image_modules() != 17899) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_xbible_engine_checksum_method_bibleengine_get_installed_modules_by_category() != 63365) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_xbible_engine_checksum_method_bibleengine_get_installed_modules_size() != 49363) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_lexicon_modules() != 57039) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_map_modules() != 27614) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_xbible_engine_checksum_method_bibleengine_get_modules_by_language() != 45564) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_xbible_engine_checksum_method_bibleengine_get_remote_module_info() != 18832) {
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_remote_module_info() != 30131) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_xbible_engine_checksum_method_bibleengine_get_remote_sources() != 59766) {
@@ -2148,10 +2546,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_xbible_engine_checksum_method_bibleengine_get_source_url() != 57952) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_task_result_modules() != 39637) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_xbible_engine_checksum_method_bibleengine_get_task_status() != 48846) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_xbible_engine_checksum_method_bibleengine_install_module() != 38326) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_xbible_engine_checksum_method_bibleengine_install_module_with_progress() != 23462) {
+    if (uniffi_xbible_engine_checksum_method_bibleengine_install_module_async() != 24181) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_xbible_engine_checksum_method_bibleengine_is_module_installed() != 4220) {
