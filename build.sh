@@ -14,20 +14,19 @@ NC='\033[0m'
 
 # --- Configuration ---
 LIB_NAME="xbible_engine" 
-OUT_DIR="./bindings"
 SWIFT_PKG_DIR="../Bible_engine_swift" 
 
 # --- Target Data ---
-# Note: For Apple targets, we use "a" (static lib) for XCFramework compatibility
+# Structure: Label | Triple | Extension | OS Folder
 TARGETS=(
-    "macOS (Intel)"        "x86_64-apple-darwin"      "a"
-    "macOS (Silicon)"      "aarch64-apple-darwin"    "a"
-    "iOS (Sim)"            "aarch64-apple-ios-sim"   "a"
-    "iOS (Device)"         "aarch64-apple-ios"       "a"
-    "Android (ARM64)"      "aarch64-linux-android"   "so"
-    "Android (x86_64/Sim)" "x86_64-linux-android"    "so"
-    "Linux (x86_64)"       "x86_64-unknown-linux-gnu" "so"
-    "Windows (x86_64)"     "x86_64-pc-windows-msvc"  "dll"
+    "macOS (Intel)"        "x86_64-apple-darwin"      "a"   "macOS"
+    "macOS (Silicon)"      "aarch64-apple-darwin"    "a"   "macOS"
+    "iOS (Sim)"            "aarch64-apple-ios-sim"   "a"   "iOS"
+    "iOS (Device)"         "aarch64-apple-ios"       "a"   "iOS"
+    "Android (ARM64)"      "aarch64-linux-android"   "so"  "Android"
+    "Android (x86_64/Sim)" "x86_64-linux-android"    "so"  "Android"
+    "Linux (x86_64)"       "x86_64-unknown-linux-gnu" "so" "Linux"
+    "Windows (x86_64)"     "x86_64-pc-windows-msvc"  "dll" "Windows"
 )
 
 LANGS=("swift" "kotlin" "csharp" "java" "c" "cpp" "python" "ruby")
@@ -38,8 +37,8 @@ echo -e "${MAGENTA}${BOLD}=======================================${NC}"
 
 # Step 1: Select Platform(s)
 echo -e "${YELLOW}1. Select Target Platforms (Recommended: 2 3 4):${NC}"
-for ((i=0; i<${#TARGETS[@]}/3; i++)); do
-    echo -e "${CYAN}$((i+1)))${NC} ${TARGETS[i*3]}"
+for ((i=0; i<${#TARGETS[@]}/4; i++)); do
+    echo -e "${CYAN}$((i+1)))${NC} ${TARGETS[i*4]}"
 done
 echo -n -e "${BOLD}Selection: ${NC}"
 read -r plat_choices
@@ -59,14 +58,15 @@ IOS_SIM_BUILT=false
 IOS_DEV_BUILT=false
 
 for p_choice in $plat_choices; do
-    idx=$(( (p_choice - 1) * 3 ))
+    idx=$(( (p_choice - 1) * 4 ))
     [ $idx -lt 0 ] || [ $idx -ge ${#TARGETS[@]} ] && continue
     
     LABEL=${TARGETS[$idx]}
     TRIPLE=${TARGETS[$idx+1]}
     EXT=${TARGETS[$idx+2]}
+    OS_DIR=${TARGETS[$idx+3]}
 
-    # Update platform trackers
+    # Update platform trackers for Apple deployment
     [[ "$TRIPLE" == "aarch64-apple-darwin" ]] && MACOS_BUILT=true
     [[ "$TRIPLE" == "aarch64-apple-ios-sim" ]] && IOS_SIM_BUILT=true
     [[ "$TRIPLE" == "aarch64-apple-ios" ]] && [[ "$TRIPLE" != *"-sim"* ]] && IOS_DEV_BUILT=true
@@ -74,7 +74,6 @@ for p_choice in $plat_choices; do
     echo -e "\n${BLUE}${BOLD}🔨 Building $LABEL ($TRIPLE)...${NC}"
     rustup target add "$TRIPLE" > /dev/null 2>&1
     
-    # Static build for Apple platforms
     cargo build --target "$TRIPLE" --release
     
     if [ $? -eq 0 ]; then
@@ -84,17 +83,22 @@ for p_choice in $plat_choices; do
             [[ "$LANG" == "swift" ]] && SWIFT_SELECTED=true
             
             if [ -n "$LANG" ]; then
-                echo -e "${YELLOW}📦 Generating $LANG bindings...${NC}"
-                mkdir -p "$OUT_DIR/$LANG"
+                # Platform specific folder logic
+                TARGET_OUT="./$OS_DIR/$LANG"
+                echo -e "${YELLOW}📦 Generating $LANG bindings in $TARGET_OUT...${NC}"
+                mkdir -p "$TARGET_OUT"
                 
-                # Check for the library file (might be in target root or triple folder)
                 LIB_PATH="./target/$TRIPLE/release/lib${LIB_NAME}.${EXT}"
                 if [ ! -f "$LIB_PATH" ]; then
                     LIB_PATH="./target/release/lib${LIB_NAME}.${EXT}"
                 fi
 
                 if [ -f "$LIB_PATH" ]; then
-                    cargo run --bin uniffi-bindgen generate --library "$LIB_PATH" --language "$LANG" --out-dir "$OUT_DIR/$LANG"
+                    cargo run --bin uniffi-bindgen generate --library "$LIB_PATH" --language "$LANG" --out-dir "$TARGET_OUT"
+                    # For non-Apple targets, move the binary to the OS folder too
+                    if [[ "$OS_DIR" != "macOS" && "$OS_DIR" != "iOS" ]]; then
+                        cp "$LIB_PATH" "$TARGET_OUT/"
+                    fi
                 else
                     echo -e "${RED}❌ Error: lib${LIB_NAME}.${EXT} not found.${NC}"
                 fi
@@ -107,61 +111,37 @@ done
 if [ "$SWIFT_SELECTED" = true ]; then
     echo -e "\n${MAGENTA}${BOLD}🍎 Creating Unified XCFramework...${NC}"
     
-    SWIFT_BIND_DIR="$OUT_DIR/swift"
+    # Identify bridge source (prioritize Mac silicon headers)
+    SWIFT_SOURCE_DIR="./macOS/swift"
+    [ ! -d "$SWIFT_SOURCE_DIR" ] && SWIFT_SOURCE_DIR="./iOS/swift"
     
-    # Standardize modulemap name for Xcode
-    if [ -f "$SWIFT_BIND_DIR/${LIB_NAME}FFI.modulemap" ]; then
-        mv "$SWIFT_BIND_DIR/${LIB_NAME}FFI.modulemap" "$SWIFT_BIND_DIR/module.modulemap"
-    fi
-
-    # Clean up previous framework
-    rm -rf "${LIB_NAME}.xcframework"
-
-    # Initialize XCFramework Arguments
-    XCB_ARGS=""
-
-    # 1. Add macOS (M1/Silicon)
-    if [ "$MACOS_BUILT" = true ]; then
-        MAC_LIB="./target/aarch64-apple-darwin/release/lib${LIB_NAME}.a"
-        if [ -f "$MAC_LIB" ]; then
-            XCB_ARGS="$XCB_ARGS -library $MAC_LIB -headers $SWIFT_BIND_DIR"
-            echo -e "${CYAN}✓ Linked macOS (Silicon)${NC}"
+    if [ -d "$SWIFT_SOURCE_DIR" ]; then
+        # Standardize modulemap for Xcode
+        if [ -f "$SWIFT_SOURCE_DIR/${LIB_NAME}FFI.modulemap" ]; then
+            cp "$SWIFT_SOURCE_DIR/${LIB_NAME}FFI.modulemap" "$SWIFT_SOURCE_DIR/module.modulemap"
         fi
-    fi
 
-    # 2. Add iOS Simulator
-    if [ "$IOS_SIM_BUILT" = true ]; then
-        SIM_LIB="./target/aarch64-apple-ios-sim/release/lib${LIB_NAME}.a"
-        if [ -f "$SIM_LIB" ]; then
-            XCB_ARGS="$XCB_ARGS -library $SIM_LIB -headers $SWIFT_BIND_DIR"
-            echo -e "${CYAN}✓ Linked iOS Simulator${NC}"
+        # Setup Framework output
+        FRAMEWORK_DIR="./macOS/Frameworks"
+        mkdir -p "$FRAMEWORK_DIR"
+        rm -rf "$FRAMEWORK_DIR/${LIB_NAME}.xcframework"
+
+        XCB_ARGS=""
+        [ "$MACOS_BUILT" = true ] && XCB_ARGS="$XCB_ARGS -library ./target/aarch64-apple-darwin/release/lib${LIB_NAME}.a -headers $SWIFT_SOURCE_DIR"
+        [ "$IOS_SIM_BUILT" = true ] && XCB_ARGS="$XCB_ARGS -library ./target/aarch64-apple-ios-sim/release/lib${LIB_NAME}.a -headers $SWIFT_SOURCE_DIR"
+        [ "$IOS_DEV_BUILT" = true ] && XCB_ARGS="$XCB_ARGS -library ./target/aarch64-apple-ios/release/lib${LIB_NAME}.a -headers $SWIFT_SOURCE_DIR"
+
+        if [ -n "$XCB_ARGS" ]; then
+            xcodebuild -create-xcframework $XCB_ARGS -output "$FRAMEWORK_DIR/${LIB_NAME}.xcframework"
+            
+            if [ -d "$SWIFT_PKG_DIR" ]; then
+                echo -e "\n${YELLOW}🚚 Depositing into Swift Package: $SWIFT_PKG_DIR${NC}"
+                mkdir -p "$SWIFT_PKG_DIR/Sources/XbibleEngine"
+                cp -r "$FRAMEWORK_DIR/${LIB_NAME}.xcframework" "$SWIFT_PKG_DIR/"
+                cp "$SWIFT_SOURCE_DIR/${LIB_NAME}.swift" "$SWIFT_PKG_DIR/Sources/XbibleEngine/"
+                (cd "$SWIFT_PKG_DIR" && swift package clean)
+                echo -e "${GREEN}${BOLD}✅ Universal Package Ready!${NC}"
+            fi
         fi
-    fi
-
-    # 3. Add iOS Device
-    if [ "$IOS_DEV_BUILT" = true ]; then
-        DEV_LIB="./target/aarch64-apple-ios/release/lib${LIB_NAME}.a"
-        if [ -f "$DEV_LIB" ]; then
-            XCB_ARGS="$XCB_ARGS -library $DEV_LIB -headers $SWIFT_BIND_DIR"
-            echo -e "${CYAN}✓ Linked iOS Device${NC}"
-        fi
-    fi
-
-    # Execute xcodebuild if we have at least one library
-    if [ -n "$XCB_ARGS" ]; then
-        xcodebuild -create-xcframework $XCB_ARGS -output "${LIB_NAME}.xcframework"
-        
-        echo -e "\n${YELLOW}🚚 Depositing into Swift Package: $SWIFT_PKG_DIR${NC}"
-        mkdir -p "$SWIFT_PKG_DIR/Sources/XbibleEngine" # Folder name must match target
-        
-        # Copy the framework and the swift bridge
-        cp -r "${LIB_NAME}.xcframework" "$SWIFT_PKG_DIR/"
-        cp "$SWIFT_BIND_DIR/${LIB_NAME}.swift" "$SWIFT_PKG_DIR/Sources/XbibleEngine/"
-        
-        # Re-sync the local package
-        (cd "$SWIFT_PKG_DIR" && swift package clean)
-        echo -e "${GREEN}${BOLD}✅ Universal Package Ready! Import $SWIFT_PKG_DIR in Xcode.${NC}"
-    else
-        echo -e "${RED}❌ No Apple targets built. Cannot create XCFramework.${NC}"
     fi
 fi

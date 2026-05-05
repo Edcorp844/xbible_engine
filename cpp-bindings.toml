@@ -7,5 +7,3 @@ header = "include/sword/flatapi.h"
 lib_name = "sword"
 use_cmake = true
 link_kind = "static"
-
-# If you want to use a local checkout instead, create a `sword/` folder next to Cargo.toml.
