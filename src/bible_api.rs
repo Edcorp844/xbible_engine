@@ -238,6 +238,50 @@ impl BibleEngine {
         task_id
     }
 
+    /// Uninstall a module (Asynchronous)
+    /// Returns a TaskID for tracking progress
+    pub fn uninstall_module_async(&self, module_name: String) -> String {
+        let mut id_lock = self.next_task_id.lock().unwrap();
+        let task_id = format!("task_{}", *id_lock);
+        *id_lock += 1;
+
+        let mut tasks = self.tasks.lock().unwrap();
+        tasks.insert(task_id.clone(), TaskData {
+            status: TaskStatus {
+                task_id: task_id.clone(),
+                state: TaskState::Running,
+                progress: 0.0,
+                message: format!("Uninstalling {}...", module_name),
+            },
+            result_modules: Vec::new(),
+        });
+
+        let task_id_clone = task_id.clone();
+        let tasks_clone = self.tasks.clone();
+        let engine_clone = self.sword_engine.clone();
+
+        thread::spawn(move || {
+            let res = engine_clone.uninstall_module(&module_name);
+            
+            let mut tasks = tasks_clone.lock().unwrap();
+            if let Some(task) = tasks.get_mut(&task_id_clone) {
+                if let TaskState::Failed { .. } = task.status.state {
+                    return;
+                }
+                if res == 0 {
+                    task.status.state = TaskState::Completed;
+                    task.status.progress = 1.0;
+                    task.status.message = format!("Successfully uninstalled {}", module_name);
+                } else {
+                    task.status.state = TaskState::Failed { error: format!("Uninstall failed with code {}", res) };
+                    task.status.message = format!("Failed to uninstall {}", module_name);
+                }
+            }
+        });
+
+        task_id
+    }
+
     /// Get all available module categories
     pub fn get_available_categories(&self) -> Vec<String> {
         let mut categories: Vec<String> = self.sword_engine.get_modules().into_iter().map(|m| m.category).collect();
@@ -349,6 +393,12 @@ impl BibleEngine {
     /// Returns 0 on success, non-zero error code on failure
     pub fn install_module(&self, source: &str, module_name: &str) -> i32 {
         self.sword_engine.install_remote_module(source, module_name)
+    }
+
+    /// Uninstall a module
+    /// Returns 0 on success, non-zero error code on failure
+    pub fn uninstall_module(&self, module_name: &str) -> i32 {
+        self.sword_engine.uninstall_module(module_name)
     }
 
     /// Get download progress (0.0 to 1.0)

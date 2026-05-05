@@ -410,6 +410,28 @@ impl SwordEngine {
         }
     }
 
+    pub fn uninstall_module(&self, module_name: &str) -> i32 {
+        let c_mod = CString::new(module_name).unwrap();
+        let mut inner = self.inner.lock().unwrap();
+
+        unsafe {
+            println!("[SwordEngine] Uninstalling module: {}", module_name);
+            let res = org_crosswire_sword_InstallMgr_uninstallModule(
+                inner.install_mgr,
+                inner.mgr,
+                c_mod.as_ptr(),
+            );
+            println!("[SwordEngine] Uninstall result: {}", res);
+
+            if res == 0 {
+                println!("[SwordEngine] Uninstallation successful, refreshing main engine awareness");
+                self.rebuild_mgr(&mut inner);
+            }
+
+            res
+        }
+    }
+
     pub fn get_download_progress(&self) -> f64 {
         let total = PROGRESS_TOTAL.load(Ordering::SeqCst);
         let completed = PROGRESS_COMPLETED.load(Ordering::SeqCst);
