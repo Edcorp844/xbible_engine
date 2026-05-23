@@ -4,6 +4,7 @@ use crate::{
     ffi::*, sword_engine::module_engine::sword_engine::SwordEngine};
 
 #[derive(Debug, Clone)]
+#[derive(uniffi::Record)]
 pub struct DictionaryResult {
     pub module_name: String,
     pub key: String,
@@ -11,11 +12,13 @@ pub struct DictionaryResult {
 }
 
 #[derive(Debug, Clone)]
+#[derive(uniffi::Record)]
 pub struct DictionaryResponse {
     pub results: Vec<DictionaryResult>,
 }
 
 #[derive(Debug, Clone)]
+#[derive(uniffi::Record)]
 pub struct DictionaryQuery {
     pub word: String,
     pub strongs: Vec<String>,
@@ -27,6 +30,7 @@ impl SwordEngine {
         let mut results = Vec::new();
         let dict_modules = self.get_dictionary_modules();
 
+        // Filter modules by the requested target language
         let language_modules: Vec<_> = dict_modules
             .into_iter()
             .filter(|module| module.language.to_lowercase() == query.language.to_lowercase())
@@ -34,34 +38,64 @@ impl SwordEngine {
 
         for module in language_modules {
             let mut search_keys = Vec::new();
+            
+            // 1. Collect literal word variations if present
             if !query.word.is_empty() {
                 search_keys.push(query.word.clone());
             }
 
+            // 2. Lexicon Expansion: Process Strong's numbers if provided
+            for strong in &query.strongs {
+                if !strong.is_empty() {
+                    search_keys.push(strong.clone());
+                    // Many Lexicons require normalized variations (e.g., stripping prefixes or padding digits)
+                    if let Some(normalized) = self.normalize_strongs_number(strong) {
+                        if normalized != *strong {
+                            search_keys.push(normalized);
+                        }
+                    }
+                }
+            }
+
+            // Execute the searches against the current module
             for key in search_keys {
-                // We try the key variations
+                // Key variations for case-insensitivity checks
                 let keys_to_try = vec![key.clone(), key.to_uppercase(), key.to_lowercase()];
 
                 for k in keys_to_try {
-                    // 1. Attempt to get the entry
+                    // Attempt to get the entry
                     if let Some((actual_key, definition)) =
                         self.get_dictionary_entry_with_key_check(&module.name, &k)
                     {
-                        // 2. STRICT CHECK: Does the actual key from SWORD match our requested key?
-                        // We use case-insensitive comparison to be safe, or exact if you prefer.
+                        // STRICT CHECK: Does SWORD's resolved key match our intent?
                         if actual_key.to_lowercase() == k.to_lowercase() {
                             results.push(DictionaryResult {
                                 module_name: module.description.clone(),
-                                key: actual_key, // Use the official key from the module
-                                definition: definition,
+                                key: actual_key, // Use the official key from the module (e.g. G3056)
+                                definition,
                             });
-                            break; // Found the exact match for this module
+                            break; // Found the exact match for this module, move to next module
                         }
                     }
                 }
             }
         }
         DictionaryResponse { results }
+    }
+
+    /// Helper to handle structural variations in Strong's numbers across modules.
+    /// SWORD Lexicons can be picky: some want "G3056", some want "3056", others "03056".
+    fn normalize_strongs_number(&self, strong: &str) -> Option<String> {
+        let prefix = strong.chars().next()?;
+        if prefix.is_ascii_alphabetic() {
+            let number_part = &strong[1..];
+            if let Ok(parsed_num) = number_part.parse::<u32>() {
+                // Returns a padded string variation (e.g., 'G03056' or zeroless '3056')
+                // Adjust formatting here if your specific modules require strict padding layouts
+                return Some(format!("{}{:04}", prefix.to_uppercase(), parsed_num));
+            }
+        }
+        None
     }
 
     fn get_dictionary_entry_with_key_check(
@@ -142,6 +176,4 @@ impl SwordEngine {
             }
         }
     }
-
-    
 }

@@ -3,6 +3,8 @@ use std::sync::Mutex;
 use std::collections::HashMap;
 use std::thread;
 use std::time::Duration;
+use crate::sword_engine::module_engine::sword_engine_dictionary_ext::DictionaryQuery;
+use crate::sword_engine::module_engine::sword_engine_dictionary_ext::DictionaryResponse;
 use crate::sword_engine::module_engine::{sword_engine::SwordEngine, sword_module::{SwordModule, ModuleBook}};
 /// Download progress details for module installation
 #[derive(Debug, Clone, uniffi::Record)]
@@ -337,10 +339,15 @@ impl BibleEngine {
         self.sword_engine.get_bible_structure(module_name)
     }
 
+    // Look up a word in the dictionary modules for a specific language and return definitions
+    pub fn lookup_dictionary(&self, query: DictionaryQuery) -> DictionaryResponse {
+        self.sword_engine.lookup_dictionary(query)
+    }
+
     /// Get content for a specific reference (e.g., "Genesis 1:1" or "John 3:16")
     /// using a specific module
     pub fn get_content(&self, module_name: &str, reference: &str) -> Vec<crate::sword_engine::module_engine::sword_engine_module_content_ext::Section> {
-        let modules = self.sword_engine.get_bible_modules();
+        let modules = self.sword_engine.get_modules();
         if let Some(module) = modules.into_iter().find(|m| m.name == module_name) {
             self.sword_engine.get_single_entry(Some(&module), reference)
         } else {
@@ -351,7 +358,7 @@ impl BibleEngine {
     /// Get content for a whole chapter (e.g., "Genesis 1" or "John 3")
     /// using a specific module
     pub fn get_chapter_content(&self, module_name: &str, reference: &str) -> Vec<crate::sword_engine::module_engine::sword_engine_module_content_ext::Section> {
-        let modules = self.sword_engine.get_bible_modules();
+        let modules = self.sword_engine.get_modules();
         if let Some(module) = modules.into_iter().find(|m| m.name == module_name) {
             self.sword_engine.get_whole_chapter(&module, reference)
         } else {
