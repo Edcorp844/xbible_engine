@@ -5,6 +5,8 @@ use std::thread;
 use std::time::Duration;
 use crate::sword_engine::module_engine::sword_engine_dictionary_ext::DictionaryQuery;
 use crate::sword_engine::module_engine::sword_engine_dictionary_ext::DictionaryResponse;
+use crate::sword_engine::module_engine::sword_engine_lexicon_ext::LexiconQuery;
+use crate::sword_engine::module_engine::sword_engine_lexicon_ext::LexiconResponse;
 use crate::sword_engine::module_engine::{sword_engine::SwordEngine, sword_module::{SwordModule, ModuleBook}};
 /// Download progress details for module installation
 #[derive(Debug, Clone, uniffi::Record)]
@@ -342,6 +344,11 @@ impl BibleEngine {
     // Look up a word in the dictionary modules for a specific language and return definitions
     pub fn lookup_dictionary(&self, query: DictionaryQuery) -> DictionaryResponse {
         self.sword_engine.lookup_dictionary(query)
+    }
+
+    // Look up a Strong's number in the lexicon modules for a specific language and return detailed information
+    pub fn lookup_strongs_number(&self, query: LexiconQuery) -> LexiconResponse {
+        self.sword_engine.lookup_strongs_number(query)
     }
 
     /// Get content for a specific reference (e.g., "Genesis 1:1" or "John 3:16")
