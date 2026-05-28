@@ -60,14 +60,14 @@ pub struct TaskData {
 /// High-level Bible API abstraction layer for UniFFI export
 /// Provides a clean interface for Swift and other languages to interact with Bible modules
 #[derive(uniffi::Object)]
-pub struct BibleEngine {
+pub struct XBibleEngine {
     module_engine: Arc<ModuleEngine>,
     tasks: Arc<Mutex<HashMap<String, TaskData>>>,
     next_task_id: Arc<Mutex<u64>>,
 }
 
 #[uniffi::export]
-impl BibleEngine {
+impl XBibleEngine {
     /// Create a new BibleEngine instance
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
