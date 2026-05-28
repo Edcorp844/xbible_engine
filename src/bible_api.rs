@@ -5,11 +5,11 @@ use std::thread;
 use std::time::Duration;
 
 use crate::engines::module_engine::module_engine::ModuleEngine;
-use crate::engines::module_engine::module_engine_dictionary_ext::DictionaryQuery;
-use crate::engines::module_engine::module_engine_dictionary_ext::DictionaryResponse;
-use crate::engines::module_engine::module_engine_lexicon_ext::LexiconQuery;
-use crate::engines::module_engine::module_engine_lexicon_ext::LexiconResponse;
-use crate::engines::module_engine::module_engine_module_content_ext::Section;
+use crate::engines::module_engine::module_engine_extensions::module_engine_dictionary_ext::DictionaryQuery;
+use crate::engines::module_engine::module_engine_extensions::module_engine_dictionary_ext::DictionaryResponse;
+use crate::engines::module_engine::module_engine_extensions::module_engine_lexicon_ext::LexiconQuery;
+use crate::engines::module_engine::module_engine_extensions::module_engine_lexicon_ext::LexiconResponse;
+use crate::engines::module_engine::module_engine_extensions::module_engine_module_content_ext::Section;
 use crate::engines::module_engine::sword_module::module::SwordModule;
 use crate::engines::module_engine::sword_module::module_book::ModuleBook;
 

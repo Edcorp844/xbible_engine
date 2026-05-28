@@ -1,6 +1,6 @@
 use roxmltree::Node;
 
-use crate::engines::{module_engine::module_engine_module_content_ext::{LexicalInfo, TextDirection, Verse, Word}, osis_translation_engine::engine::OsisTransilationEngine};
+use crate::engines::{module_engine::module_engine_extensions::module_engine_module_content_ext::{LexicalInfo, TextDirection, Verse, Word}, osis_translation_engine::engine::OsisTransilationEngine};
 
 impl OsisTransilationEngine {
     pub (crate) fn create_word(

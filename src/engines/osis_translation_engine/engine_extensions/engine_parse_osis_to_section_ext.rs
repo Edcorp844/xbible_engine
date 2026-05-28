@@ -1,12 +1,11 @@
 use roxmltree::Document;
 
-use crate::engines::{module_engine::module_engine_module_content_ext::{Section, Verse}, osis_translation_engine::engine::OsisTransilationEngine};
-
-
+use crate::engines::{
+    module_engine::module_engine_extensions::module_engine_module_content_ext::{Section, Verse},
+    osis_translation_engine::engine::OsisTransilationEngine,
+};
 
 impl OsisTransilationEngine {
-     /// The "Master" Fix: Groups a list of verses into the minimum number of Sections.
-    /// If Verse 2, 3, and 4 have no <title> tags, they are added to Verse 1's Section.
     pub fn parse_osis_list_to_sections(
         &self,
         language: String,
@@ -21,8 +20,7 @@ impl OsisTransilationEngine {
                 Err(_) => continue,
             };
 
-            let (mut words, notes, title_words) =
-                self.parse_osis_content(&language, doc.root());
+            let (mut words, notes, title_words) = self.parse_osis_content(&language, doc.root());
 
             if words.is_empty() && title_words.is_none() {
                 continue;
