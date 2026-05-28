@@ -7,8 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::ffi::*;
-use crate::sword_engine::module_engine::sword_module::{ModuleBook, ModuleChapter, SwordModule};
-
+use crate::engines::module_engine::sword_module::module_color::ModuleColor;
+use crate::engines::module_engine::sword_module::module_book::ModuleBook;
+use crate::engines::module_engine::sword_module::module_chapter::ModuleChapter;
+use crate::engines::module_engine::sword_module::module::SwordModule;
 
 
 static PROGRESS_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -21,12 +23,12 @@ pub struct SwordInner {
 }
 
 #[derive(Debug)]
-pub struct SwordEngine {
+pub struct ModuleEngine {
     pub inner: Mutex<SwordInner>,
     pub sword_path: PathBuf,
 }
 
-impl SwordEngine {
+impl ModuleEngine {
     pub fn new() -> Arc<Self> {
         let path = Self::get_sword_path();
 
@@ -37,7 +39,7 @@ impl SwordEngine {
         let c_path = CString::new(path_str.clone()).unwrap();
 
         unsafe {
-            println!("[SwordEngine] Initializing InstallMgr at: {}", path_str);
+            println!("[ModuleEngine] Initializing InstallMgr at: {}", path_str);
             let install_mgr =
                 org_crosswire_sword_InstallMgr_new(c_path.as_ptr(), Some(Self::status_reporter));
 
@@ -45,7 +47,7 @@ impl SwordEngine {
             org_crosswire_sword_InstallMgr_setUserDisclaimerConfirmed(install_mgr);
             org_crosswire_sword_InstallMgr_syncConfig(install_mgr);
 
-            println!("[SwordEngine] Initializing SWMgr...");
+            println!("[ModuleEngine] Initializing SWMgr...");
             let mgr = org_crosswire_sword_SWMgr_newWithPath(c_path.as_ptr());
 
             let utf8_key = CString::new("UTF8").unwrap();
@@ -71,7 +73,7 @@ impl SwordEngine {
             if !msg.is_null() {
                 let message = CStr::from_ptr(msg).to_string_lossy();
                 println!(
-                    "[SwordEngine] Progress: {}/{} - {}",
+                    "[ModuleEngine] Progress: {}/{} - {}",
                     completed, total, message
                 );
             }
@@ -79,7 +81,7 @@ impl SwordEngine {
     }
 
     unsafe fn rebuild_mgr(&self, inner: &mut SwordInner) {
-        println!("[SwordEngine] Rebuilding SWMgr...");
+        println!("[ModuleEngine] Rebuilding SWMgr...");
         unsafe { org_crosswire_sword_SWMgr_delete(inner.mgr) };
 
         let path_str = self.sword_path.to_string_lossy().replace("\\", "/");
@@ -98,7 +100,7 @@ impl SwordEngine {
             org_crosswire_sword_InstallMgr_syncConfig(inner.install_mgr);
         };
 
-        println!("[SwordEngine] SWMgr rebuilt successfully");
+        println!("[ModuleEngine] SWMgr rebuilt successfully");
     }
 
     // ------------------- REMOTE SOURCES -------------------
@@ -122,7 +124,7 @@ impl SwordEngine {
 
         // If no sources were found (network issues, permissions, etc.), provide defaults
         if sources.is_empty() {
-            println!("[SwordEngine] No remote sources found, using default sources");
+            println!("[ModuleEngine] No remote sources found, using default sources");
             sources = vec![
                 "CrossWire".to_string(),
                 "IBT".to_string(),
@@ -130,7 +132,7 @@ impl SwordEngine {
             ];
         }
 
-        println!("[SwordEngine] Remote sources: {:?}", sources);
+        println!("[ModuleEngine] Remote sources: {:?}", sources);
         sources
     }
 
@@ -184,6 +186,7 @@ impl SwordEngine {
                         }
                     }
 
+                    let color_hash = format!("{}{}", self.ptr_to_str((*entry).name), self.ptr_to_str((*entry).description));
                     modules.push(SwordModule {
                         name: self.ptr_to_str((*entry).name),
                         description: self.ptr_to_str((*entry).description),
@@ -194,6 +197,7 @@ impl SwordEngine {
                         delta: self.ptr_to_str((*entry).delta),
                         cipher_key: self.ptr_to_str((*entry).cipherKey),
                         features: features_vec,
+                        signature_color: ModuleColor::generate(&color_hash),
                     });
                     i += 1;
                 }
@@ -231,6 +235,8 @@ impl SwordEngine {
                     }
                 }
 
+                 let color_hash = format!("{}{}", self.ptr_to_str((*ptr).name), self.ptr_to_str((*ptr).description));
+                  
                 modules.push(SwordModule {
                     name: self.ptr_to_str(info.name),
                     description: self.ptr_to_str(info.description),
@@ -241,13 +247,14 @@ impl SwordEngine {
                     delta: self.ptr_to_str(info.delta),
                     cipher_key: self.ptr_to_str(info.cipherKey),
                     features: features_vec, // Assign the Vec<String> here
+                    signature_color: ModuleColor::generate(&color_hash),
                 });
 
                 ptr = ptr.offset(1);
             }
         }
 
-        //println!("[SwordEngine] Local modules found: {:?}", modules);
+        //println!("[ModuleEngine] Local modules found: {:?}", modules);
         modules
     }
 
@@ -372,7 +379,7 @@ impl SwordEngine {
             let local_mgr = org_crosswire_sword_SWMgr_newWithPath(c_path.as_ptr());
 
             println!(
-                "[SwordEngine] Installing '{}' from '{}' (Background)",
+                "[ModuleEngine] Installing '{}' from '{}' (Background)",
                 module_name, source
             );
 
@@ -393,7 +400,7 @@ impl SwordEngine {
                 c_source.as_ptr(),
                 c_mod.as_ptr(),
             );
-            println!("[SwordEngine] Install result: {}", res);
+            println!("[ModuleEngine] Install result: {}", res);
 
             // 4. Cleanup local handles
             org_crosswire_sword_SWMgr_delete(local_mgr);
@@ -401,7 +408,7 @@ impl SwordEngine {
 
             // 5. If installation was successful, lock the main engine ONLY to rebuild it
             if res == 0 {
-                println!("[SwordEngine] Installation successful, refreshing main engine awareness");
+                println!("[ModuleEngine] Installation successful, refreshing main engine awareness");
                 let mut inner = self.inner.lock().unwrap();
                 self.rebuild_mgr(&mut inner);
             }
@@ -415,16 +422,16 @@ impl SwordEngine {
         let mut inner = self.inner.lock().unwrap();
 
         unsafe {
-            println!("[SwordEngine] Uninstalling module: {}", module_name);
+            println!("[ModuleEngine] Uninstalling module: {}", module_name);
             let res = org_crosswire_sword_InstallMgr_uninstallModule(
                 inner.install_mgr,
                 inner.mgr,
                 c_mod.as_ptr(),
             );
-            println!("[SwordEngine] Uninstall result: {}", res);
+            println!("[ModuleEngine] Uninstall result: {}", res);
 
             if res == 0 {
-                println!("[SwordEngine] Uninstallation successful, refreshing main engine awareness");
+                println!("[ModuleEngine] Uninstallation successful, refreshing main engine awareness");
                 self.rebuild_mgr(&mut inner);
             }
 
@@ -610,11 +617,11 @@ Directory=/sword
     }
 }
 
-impl Drop for SwordEngine {
+impl Drop for ModuleEngine {
     fn drop(&mut self) {
         let inner = self.inner.lock().unwrap();
         unsafe {
-            println!("[SwordEngine] Cleaning up SWORD handles...");
+            println!("[ModuleEngine] Cleaning up SWORD handles...");
             org_crosswire_sword_InstallMgr_delete(inner.install_mgr);
             org_crosswire_sword_SWMgr_delete(inner.mgr);
         }

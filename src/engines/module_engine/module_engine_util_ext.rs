@@ -1,7 +1,7 @@
-use crate::{ffi::org_crosswire_sword_SWMgr_setGlobalOption, sword_engine::module_engine::sword_engine::SwordEngine};
+use crate::{engines::module_engine::module_engine::ModuleEngine, ffi::org_crosswire_sword_SWMgr_setGlobalOption };
 
 
-impl SwordEngine {
+impl ModuleEngine {
     pub(crate) unsafe fn sword_ptr_to_string(
         &self,
         ptr: *const std::os::raw::c_char,

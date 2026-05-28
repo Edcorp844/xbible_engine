@@ -1,5 +1,5 @@
 use std::ffi::{CStr, CString};
-use crate::{ffi::*, sword_engine::SwordEngine};
+use crate::{engines::module_engine::module_engine::ModuleEngine, ffi::*};
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct LexiconQuery {
@@ -19,7 +19,7 @@ pub struct LexiconResponse {
     pub results: Vec<LexiconResult>,
 }
 
-impl SwordEngine {
+impl ModuleEngine {
     pub fn lookup_strongs_number(&self, query: LexiconQuery) -> LexiconResponse {
         let mut results = Vec::new();
 

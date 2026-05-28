@@ -12,5 +12,5 @@ pub fn make_sentence(words: Vec<String>) -> String{
     words.join(" ")
 }
 
-pub mod sword_engine;
+pub mod engines;
 pub mod bible_api;

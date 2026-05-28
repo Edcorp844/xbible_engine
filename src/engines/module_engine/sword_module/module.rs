@@ -1,16 +1,5 @@
-#[derive(Debug, Clone)]
-#[derive(uniffi::Record)]
-pub struct ModuleBook {
-    pub name: String,
-    pub chapters: Vec<ModuleChapter>,
-}
+use crate::engines::module_engine::sword_module::module_color::ModuleColor;
 
-#[derive(Debug, Clone)]
-#[derive(uniffi::Record)]
-pub struct ModuleChapter {
-    pub number: i32,
-    pub verse_count: i32,
-}
 
 #[derive(Debug, Clone)]
 #[derive(uniffi::Record)]
@@ -24,4 +13,5 @@ pub struct SwordModule {
     pub delta: String,
     pub cipher_key: String,
     pub features: Vec<String>,
+    pub signature_color: ModuleColor,
 }

@@ -6,6 +6,7 @@ build = "build.rs"
 
 [dependencies]
 directories = "5.0"
+fnv = "1.0.7"
 isolang = "2.4.0"
 roxmltree = "0.21.1"
 serde = { version = "1.0.228", features = ["derive"] }

@@ -1,9 +1,10 @@
 use isolang::Language;
 
-use crate::sword_engine::module_engine::sword_engine::SwordEngine;
+use crate::engines::module_engine::module_engine::ModuleEngine;
 
 
-impl SwordEngine {
+
+impl ModuleEngine {
     pub fn from_code(&self, code: &str) -> String {
         Language::from_639_1(code)
             .or_else(|| Language::from_639_3(code))

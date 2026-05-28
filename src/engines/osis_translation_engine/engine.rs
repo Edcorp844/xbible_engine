@@ -1,6 +1,6 @@
 use roxmltree::{Document, Node};
 
-use crate::sword_engine::module_engine::sword_engine_module_content_ext::{LexicalInfo, Section, TextDirection, Verse, Word};
+use crate::engines::module_engine::module_engine_module_content_ext::{LexicalInfo, Section, TextDirection, Verse, Word};
 
 pub struct OsisTransilationEngine {}
 

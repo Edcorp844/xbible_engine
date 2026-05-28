@@ -1,14 +1,14 @@
+use crate::engines::module_engine::{module_engine::ModuleEngine, sword_module::module::SwordModule};
+use crate::engines::osis_translation_engine::engine::OsisTransilationEngine;
+use crate::ffi::*;
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
 
-use crate::sword_engine::{module_engine::{sword_engine::SwordEngine, sword_module::SwordModule}, osis_translation_engine::engine::OsisTransilationEngine};
-use crate::ffi::*;
 
 
 // --- DATA STRUCTURES ---
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[derive(uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, uniffi::Record)]
 pub struct LexicalInfo {
     pub strongs: Vec<String>,
     pub lemma: Option<String>,
@@ -16,8 +16,7 @@ pub struct LexicalInfo {
     pub morph: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-#[derive(uniffi::Record)]
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct Word {
     pub text: String,
     pub is_red: bool,
@@ -50,8 +49,7 @@ impl Default for Word {
     }
 }
 
-#[derive(Debug, Clone)]
-#[derive(uniffi::Record)]
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct Verse {
     pub osis_id: String,
     pub number: i32,
@@ -60,16 +58,13 @@ pub struct Verse {
     pub is_paragraph_start: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-#[derive(uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum TextDirection {
     Rtl,
     Ltr,
 }
 
-
-#[derive(Debug, Clone)]
-#[derive(uniffi::Record)]
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct Section {
     pub title: Vec<Word>,
     pub verses: Vec<Verse>,
@@ -78,7 +73,7 @@ pub struct Section {
 
 // --- CORE ENGINE IMPLEMENTATION ---
 
-impl SwordEngine {
+impl ModuleEngine {
     unsafe fn fetch_and_parse_current_entry(
         &self,
         h_mod: isize,
@@ -214,5 +209,3 @@ impl SwordEngine {
         Some((book, chapter.to_string()))
     }
 }
-
-

@@ -1,4 +1,5 @@
-use crate::sword_engine::module_engine::sword_engine::SwordEngine;
+use crate::engines::module_engine::module_engine::ModuleEngine;
+
 
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14,7 +15,7 @@ pub struct CategorizedBook {
     pub index: usize,
 }
 
-impl SwordEngine {
+impl ModuleEngine{
     /// Returns books grouped by Testament based on the standard 66-book canon.
     /// This uses your existing bible_structure internal logic.
     pub fn get_categorized_books(&self, module_name: &str) -> Vec<CategorizedBook> {
