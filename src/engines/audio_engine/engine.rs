@@ -42,11 +42,20 @@ impl LyricTrack {
     }
 
     pub fn current_line_index(&self, current_time_ms: i64) -> i32 {
-        if self.lines.is_empty() { return -1; }
-        match self.lines.binary_search_by_key(&current_time_ms, |line| line.timestamp_ms) {
+        if self.lines.is_empty() {
+            return -1;
+        }
+        match self
+            .lines
+            .binary_search_by_key(&current_time_ms, |line| line.timestamp_ms)
+        {
             Ok(exact_index) => exact_index as i32,
             Err(insertion_index) => {
-                if insertion_index > 0 { (insertion_index - 1) as i32 } else { 0 }
+                if insertion_index > 0 {
+                    (insertion_index - 1) as i32
+                } else {
+                    0
+                }
             }
         }
     }
@@ -72,7 +81,7 @@ pub struct PlaybackState {
 
 #[derive(uniffi::Object)]
 pub struct AudioEngine {
-    // FIX: Wrap the player in a Mutex to allow thread-safe interior mutability
+    // Player wrapped in a Mutex to allow thread-safe interior mutability
     native_player: Mutex<Option<Arc<dyn NativeAudioPlayer>>>,
     current_track: Mutex<Option<LyricTrack>>,
 }
@@ -82,13 +91,11 @@ impl AudioEngine {
     #[uniffi::constructor]
     pub fn new() -> Self {
         AudioEngine {
-            // FIX: Initialize with a Mutex
             native_player: Mutex::new(None),
             current_track: Mutex::new(None),
         }
     }
 
-    // FIX: Changed from `&mut self` to `&self` so UniFFI's Arc wrapper works seamlessly
     pub fn register_player(&self, player: Arc<dyn NativeAudioPlayer>) {
         let mut player_lock = self.native_player.lock().unwrap();
         *player_lock = Some(player);
@@ -104,19 +111,20 @@ impl AudioEngine {
         // FIX: Acquire lock before reading the shared native player reference
         let player_lock = self.native_player.lock().unwrap();
         let player = player_lock.as_ref()?;
-        
+
         let track_lock = self.current_track.lock().unwrap();
         let track = track_lock.as_ref()?;
 
         let current_time_ms = player.get_current_time_ms();
         let is_playing = player.is_playing();
         let active_lyric_index = track.current_line_index(current_time_ms);
-        
-        let active_text = if active_lyric_index >= 0 && (active_lyric_index as usize) < track.lines.len() {
-            track.lines[active_lyric_index as usize].text.clone()
-        } else {
-            String::new()
-        };
+
+        let active_text =
+            if active_lyric_index >= 0 && (active_lyric_index as usize) < track.lines.len() {
+                track.lines[active_lyric_index as usize].text.clone()
+            } else {
+                String::new()
+            };
 
         Some(PlaybackState {
             current_time_ms,
