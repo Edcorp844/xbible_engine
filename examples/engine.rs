@@ -1,4 +1,4 @@
-use xbible_engine::{bible_api::XBibleEngine, engines::module_engine::module_engine_extensions::module_engine_lexicon_ext::LexiconQuery};
+use xbible_engine::engines::{module_engine::module_engine_extensions::module_engine_lexicon_ext::LexiconQuery, xbible_engine::engine::XBibleEngine};
 
 fn main() {
     let engine = XBibleEngine::new();
