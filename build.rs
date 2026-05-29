@@ -100,19 +100,22 @@ fn main() {
     let include_path = dst.join("include");
     let header_path = include_path.join("sword").join("flatapi.h");
 
+    let Ok(target_version) = bindgen::RustTarget::stable(96, 0) else {
+        panic!("The specified Rust version is not recognized by your bindgen version.");
+    };
+
     let bindings = bindgen::Builder::default()
         .header(header_path.to_str().expect("Could not find flatapi.h"))
         .clang_arg(format!("-I{}", include_path.display()))
         .allowlist_function("org_crosswire_sword.*")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
-        .rust_target(bindgen::RustTarget::Stable_1_77)
+        .rust_target(target_version)
+        .wrap_unsafe_ops(true)
         .generate()
         .expect("Unable to generate bindings");
 
-    let mut bindings_string = bindings.to_string();
-    bindings_string = bindings_string.replace("extern \"C\" {", "unsafe extern \"C\" {");
-
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-    fs::write(out_path.join("bindings.rs"), bindings_string)
+    bindings
+        .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings!");
 }

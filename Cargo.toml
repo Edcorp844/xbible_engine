@@ -5,6 +5,7 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
+
 directories = "5.0"
 fnv = "1.0.7"
 isolang = "2.4.0"
@@ -16,7 +17,7 @@ uniffi = { version = "0.31.1", features = ["cli", "scaffolding-ffi-buffer-fns"] 
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [build-dependencies]
-bindgen = "0.70"
+bindgen = "0.72.1"
 cmake = "0.1"
 toml = "0.7"
 pkg-config = "0.3"
