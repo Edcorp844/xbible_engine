@@ -30,6 +30,7 @@ pub struct EngineGlobalOption {
     pub state: String,
 }
 
+#[uniffi::export]
 impl XBibleEngine {
     /// Fetch available modules from a remote source (Asynchronous)
     /// Returns a TaskID for tracking progress

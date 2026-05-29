@@ -1,0 +1,8 @@
+# uniffi.toml
+[bindings.swift]
+# This forces the generated callback wrapper structures to implement Sendable
+custom_types = { }
+
+[[bindings.swift.callback_interface_attributes]]
+name = "NativeAudioPlayer"
+attributes = ["@unchecked Sendable"]

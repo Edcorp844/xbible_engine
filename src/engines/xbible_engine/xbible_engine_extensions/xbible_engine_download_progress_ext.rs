@@ -10,6 +10,7 @@ pub struct DownloadProgress {
     pub status: String,         // "downloading", "extracting", "complete", "error"
 }
 
+#[uniffi::export]
 impl XBibleEngine {
     /// Get detailed download progress for module installation
     pub fn get_download_progress_details(&self) -> DownloadProgress {

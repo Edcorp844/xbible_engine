@@ -21,6 +21,7 @@ pub struct TaskData {
     pub(crate) result_modules: Vec<SwordModule>,
 }
 
+#[uniffi::export]
 impl XBibleEngine {
     /// Cancel a background task
     pub fn cancel_task(&self, task_id: String) {

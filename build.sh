@@ -94,7 +94,27 @@ for p_choice in $plat_choices; do
                 fi
 
                 if [ -f "$LIB_PATH" ]; then
-                    cargo run --bin uniffi-bindgen generate --library "$LIB_PATH" --language "$LANG" --out-dir "$TARGET_OUT"
+                    # --- FIX: Point UniFFI to the .dylib representation instead of the static archive (.a) to stop the metadata panic ---
+                    BINDGEN_INPUT_PATH="$LIB_PATH"
+                    if [[ "$OS_DIR" == "macOS" || "$OS_DIR" == "iOS" ]]; then
+                        DYLIB_PATH="./target/$TRIPLE/release/lib${LIB_NAME}.dylib"
+                        if [ -f "$DYLIB_PATH" ]; then
+                            BINDGEN_INPUT_PATH="$DYLIB_PATH"
+                        fi
+                    fi
+
+                    if [[ "$LANG" == "swift" ]]; then
+                        cargo run --bin uniffi-bindgen generate "$BINDGEN_INPUT_PATH" --language "$LANG" --config ./uniffi.toml --out-dir "$TARGET_OUT"
+                        
+                        # --- FIX: Inject 'nonisolated(unsafe)' to silence the Swift 6 vtable Concurrency Error ---
+                        if [ -f "$TARGET_OUT/${LIB_NAME}.swift" ]; then
+                            echo -e "${YELLOW}🩹 Patching generated Swift file for Swift 6 Concurrency compatibility...${NC}"
+                            sed -i '' 's/static let vtablePtr/nonisolated\(unsafe\) static let vtablePtr/g' "$TARGET_OUT/${LIB_NAME}.swift"
+                        fi
+                    else
+                        cargo run --bin uniffi-bindgen generate "$BINDGEN_INPUT_PATH" --language "$LANG" --out-dir "$TARGET_OUT"
+                    fi
+
                     # For non-Apple targets, move the binary to the OS folder too
                     if [[ "$OS_DIR" != "macOS" && "$OS_DIR" != "iOS" ]]; then
                         cp "$LIB_PATH" "$TARGET_OUT/"
