@@ -1,13 +1,15 @@
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
     aead::{Aead, KeyInit},
 };
 use directories::ProjectDirs;
+
+use crate::engines::audio_engine::utils::artwork::Artwork;
 
 const SECRET_KEY: &[u8; 32] = &[
     0x5f, 0x93, 0xbc, 0x1d, 0x07, 0x58, 0x1a, 0x82, 0x4b, 0x15, 0x26, 0x0c, 0x9a, 0xec, 0x95, 0x3c,
@@ -80,7 +82,7 @@ pub struct AudioModuleInfo {
     pub file_name: String,
     pub absolute_path: String,
     pub metadata: Option<ModuleMetadata>,
-    pub artwork_bytes: Option<Vec<u8>>,
+    pub artwork: Arc<Artwork>, // 🌟 CHANGED: Now holds the ArtWork struct which can internally manage byte extraction
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -131,12 +133,12 @@ impl AudioEngine {
                 {
                     if let Some(name_str) = file_path.file_name().and_then(|n| n.to_str()) {
                         let metadata = self.read_module_metadata_peek(&file_path);
+                        let artwork = Artwork::new(file_path.to_string_lossy().into_owned());
                         modules.push(AudioModuleInfo {
                             file_name: name_str.to_string(),
                             absolute_path: file_path.to_string_lossy().into_owned(),
                             metadata,
-                            artwork_bytes: self
-                                .extract_artwork_bytes(file_path.to_string_lossy().into_owned()),
+                            artwork: Arc::new(artwork), // 🌟 Now we construct the Artwork struct which internally handles byte extraction logic
                         });
                     }
                 }
@@ -266,78 +268,8 @@ impl AudioEngine {
         serde_json::from_str(&contents).ok()
     }
 
-    /// Extracts artwork bytes, with a strict fallback sequence if metadata misses it
-    pub fn extract_artwork_bytes(&self, file_path: String) -> Option<Vec<u8>> {
-        let path = Path::new(&file_path);
-        let file = File::open(path).ok()?;
-        let mut archive = zip::ZipArchive::new(file).ok()?;
+   
 
-        // --- STRATEGY 1: Try reading from metadata.json first ---
-        // We isolate this variable out here so it survives past the metadata file borrow scope
-        let mut target_artwork_name: Option<String> = None;
-
-        // Scope block to explicitly isolate and drop the metadata file borrow
-        {
-            if let Ok(mut meta_file) = archive.by_name("metadata.json") {
-                let mut contents = String::new();
-                if meta_file.read_to_string(&mut contents).is_ok() {
-                    if let Ok(metadata) = serde_json::from_str::<ModuleMetadata>(&contents) {
-                        target_artwork_name = metadata.artwork_file;
-                    }
-                }
-            }
-        } // 🌟 'meta_file' drops here! The borrow on 'archive' is completely released.
-
-        // Now we can safely borrow 'archive' again without conflicts
-        if let Some(artwork_name) = target_artwork_name {
-            if let Ok(mut image_file) = archive.by_name(&artwork_name) {
-                let mut buffer = Vec::new();
-                if image_file.read_to_end(&mut buffer).is_ok() {
-                    return Some(buffer);
-                }
-            }
-        }
-
-        // --- STRATEGY 2: Fallback scan if metadata failed or field was empty ---
-        let common_fallbacks = [
-            "artwork.jpg",
-            "artwork.jpeg",
-            "artwork.png",
-            "cover.jpg",
-            "cover.jpeg",
-            "cover.png",
-            "image.jpg",
-            "image.png",
-        ];
-
-        for filename in common_fallbacks.iter() {
-            if let Ok(mut image_file) = archive.by_name(filename) {
-                let mut buffer = Vec::new();
-                if image_file.read_to_end(&mut buffer).is_ok() {
-                    return Some(buffer);
-                }
-            }
-        }
-
-        // --- STRATEGY 3: Ultra-lenient fallback (Grab the first image format inside) ---
-        for i in 0..archive.len() {
-            if let Ok(mut file) = archive.by_index(i) {
-                let name = file.name().to_lowercase();
-                if name.ends_with(".jpg")
-                    || name.ends_with(".jpeg")
-                    || name.ends_with(".png")
-                    || name.ends_with(".webp")
-                {
-                    let mut buffer = Vec::new();
-                    if file.read_to_end(&mut buffer).is_ok() {
-                        return Some(buffer);
-                    }
-                }
-            }
-        }
-
-        None
-    }
 }
 
 /// Helper algorithm that recursively walks down the tree structures searching for time intersections
