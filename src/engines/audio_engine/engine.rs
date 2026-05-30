@@ -3,41 +3,62 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::Mutex;
 
+use chacha20poly1305::{
+    ChaCha20Poly1305, Nonce,
+    aead::{Aead, KeyInit},
+};
 use directories::ProjectDirs;
 
-// --- ERROR HANDLING FOR UNIFFI COMPATIBILITY ---
+const SECRET_KEY: &[u8; 32] = &[
+    0x5f, 0x93, 0xbc, 0x1d, 0x07, 0x58, 0x1a, 0x82, 0x4b, 0x15, 0x26, 0x0c, 0x9a, 0xec, 0x95, 0x3c,
+    0x87, 0x60, 0x9e, 0x62, 0x12, 0x28, 0x9d, 0xfa, 0xcd, 0x3e, 0x7b, 0x03, 0xef, 0x81, 0x44, 0xd2,
+];
+
+// --- ERROR HANDLING ---
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum AudioEngineError {
     #[error("Container package item not found: {path}")]
     ModuleNotFound { path: String },
-    
+
     #[error("File system I/O error occurred: {message}")]
     IoFailure { message: String },
-    
+
     #[error("Failed to parse structural JSON content format: {message}")]
     SerializationFailure { message: String },
+
+    #[error("Decryption safety failure: {message}")]
+    DecryptionFailure { message: String },
 }
 
 impl From<std::io::Error> for AudioEngineError {
     fn from(err: std::io::Error) -> Self {
-        AudioEngineError::IoFailure { message: err.to_string() }
+        AudioEngineError::IoFailure {
+            message: err.to_string(),
+        }
     }
 }
 
 impl From<serde_json::Error> for AudioEngineError {
     fn from(err: serde_json::Error) -> Self {
-        AudioEngineError::SerializationFailure { message: err.to_string() }
+        AudioEngineError::SerializationFailure {
+            message: err.to_string(),
+        }
     }
 }
 
-// --- DATA STRUCTURE RECORDS ---
+// --- DATA STRUCTURE RECORDS (EXPOSED TO SWIFT) ---
 
 #[derive(Debug, Clone, uniffi::Record, serde::Deserialize)]
-pub struct AudioTextAnchor {
-    pub start_ms: i64,
-    pub end_ms: i64,
-    pub text: String,
+pub struct AudioNode {
+    pub r#type: String, // "Collection", "Section", "Chapter", "Verse"
+    pub id: String,
+    pub title: String,
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
+    pub text: Option<String>,
+    #[serde(default)]
+    pub children: Vec<AudioNode>,
 }
 
 #[derive(Debug, Clone, uniffi::Record, serde::Deserialize)]
@@ -51,35 +72,16 @@ pub struct ModuleMetadata {
     pub source_url: String,
     pub duration_ms: i64,
     pub features: Vec<String>,
+    pub artwork_file: Option<String>, // 🌟 ADDED: This matches your Packager CLI struct exactly!
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct AudioModuleInfo {
     pub file_name: String,
+    pub absolute_path: String,
     pub metadata: Option<ModuleMetadata>,
+    pub artwork_bytes: Option<Vec<u8>>,
 }
-
-// --- 1. THE EXPLICIT RANGE TIMELINE TRACK ---
-
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct RangeTrack {
-    pub anchors: Vec<AudioTextAnchor>,
-}
-
-impl RangeTrack {
-    /// Resolves the correct index matching the current time window.
-    /// Returns -1 if the time falls into a gap where no text is mapped.
-    pub fn current_anchor_index(&self, current_time_ms: i64) -> i32 {
-        for (idx, anchor) in self.anchors.iter().enumerate() {
-            if current_time_ms >= anchor.start_ms && current_time_ms <= anchor.end_ms {
-                return idx as i32;
-            }
-        }
-        -1 // In an empty gap or between verses
-    }
-}
-
-// --- 2. THE AUDIO STATE RECORD ---
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct PlaybackState {
@@ -89,23 +91,20 @@ pub struct PlaybackState {
     pub is_playing: bool,
 }
 
-// --- 3. THE AUDIO ENGINE COORDINATOR ---
+// --- AUDIO ENGINE COORDINATOR ---
 
 #[derive(uniffi::Object)]
 pub struct AudioEngine {
-    current_track: Mutex<Option<RangeTrack>>,
+    current_tree: Mutex<Option<AudioNode>>,
     loaded_audio_bytes: Mutex<Option<Vec<u8>>>,
 }
-
-// --- 1. THE EXPLICIT EXPORTED INTERFACE FOR SWIFT ---
-// Keep only your public, FFI-compatible types and methods here.
 
 #[uniffi::export]
 impl AudioEngine {
     #[uniffi::constructor]
     pub fn new() -> Self {
         AudioEngine {
-            current_track: Mutex::new(None),
+            current_tree: Mutex::new(None),
             loaded_audio_bytes: Mutex::new(None),
         }
     }
@@ -125,14 +124,19 @@ impl AudioEngine {
         if let Ok(entries) = fs::read_dir(path) {
             for entry in entries.flatten() {
                 let file_path = entry.path();
-                if file_path.is_file() && file_path.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("xba")) {
+                if file_path.is_file()
+                    && file_path
+                        .extension()
+                        .map_or(false, |ext| ext.eq_ignore_ascii_case("xba"))
+                {
                     if let Some(name_str) = file_path.file_name().and_then(|n| n.to_str()) {
-                        // Calling across to our standard, non-exported helper block
                         let metadata = self.read_module_metadata_peek(&file_path);
-                        
                         modules.push(AudioModuleInfo {
                             file_name: name_str.to_string(),
+                            absolute_path: file_path.to_string_lossy().into_owned(),
                             metadata,
+                            artwork_bytes: self
+                                .extract_artwork_bytes(file_path.to_string_lossy().into_owned()),
                         });
                     }
                 }
@@ -141,23 +145,18 @@ impl AudioEngine {
         modules
     }
 
-    pub fn get_current_playback_state(&self, current_time_ms: i64, is_playing: bool) -> Option<PlaybackState> {
-        let track_lock = self.current_track.lock().unwrap();
-        let track = track_lock.as_ref()?;
-        let active_anchor_index = track.current_anchor_index(current_time_ms);
-
-        let active_text = if active_anchor_index >= 0 && (active_anchor_index as usize) < track.anchors.len() {
-            track.anchors[active_anchor_index as usize].text.clone()
-        } else {
-            String::new()
-        };
-
-        Some(PlaybackState {
-            current_time_ms,
-            active_anchor_index,
-            active_text,
-            is_playing,
-        })
+    pub fn peek_module_metadata(
+        &self,
+        file_path: String,
+    ) -> Result<ModuleMetadata, AudioEngineError> {
+        let path = Path::new(&file_path);
+        if !path.exists() {
+            return Err(AudioEngineError::ModuleNotFound { path: file_path });
+        }
+        self.read_module_metadata_peek(path)
+            .ok_or_else(|| AudioEngineError::SerializationFailure {
+                message: "Could not read metadata.json".to_string(),
+            })
     }
 
     pub fn load_audio_module(&self, file_path: String) -> Result<Vec<u8>, AudioEngineError> {
@@ -167,65 +166,201 @@ impl AudioEngine {
         }
 
         let file = File::open(path)?;
-        let mut archive = zip::ZipArchive::new(file)
-            .map_err(|e| AudioEngineError::IoFailure { message: format!("Invalid ZIP: {}", e) })?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| AudioEngineError::IoFailure {
+            message: format!("Invalid ZIP archive structure: {}", e),
+        })?;
 
-        let range_track = if let Ok(mut timestamps_file) = archive.by_name("timestamps.json") {
-            let mut json_contents = String::new();
-            timestamps_file.read_to_string(&mut json_contents)?;
-            let anchors: Vec<AudioTextAnchor> = serde_json::from_str(&json_contents)?;
-            RangeTrack { anchors }
-        } else {
-            return Err(AudioEngineError::IoFailure { message: "Missing timestamps.json".to_string() });
-        };
+        // 1. FIXED: Parse as a hierarchical AudioNode object instead of Vec<AudioTextAnchor>
+        let root_tree: AudioNode =
+            if let Ok(mut timestamps_file) = archive.by_name("timestamps.json") {
+                let mut json_contents = String::new();
+                timestamps_file.read_to_string(&mut json_contents)?;
 
-        let audio_bytes = if let Ok(mut audio_file) = archive.by_name("audio.mp3") {
+                // Serde will now correctly navigate the recursive tree framework
+                serde_json::from_str(&json_contents)?
+            } else {
+                return Err(AudioEngineError::IoFailure {
+                    message: "Missing required timestamps.json file".to_string(),
+                });
+            };
+
+        // 2. Extract ENCRYPTED MP3 Data Stream
+        let encrypted_audio_bytes = if let Ok(mut audio_file) = archive.by_name("audio.mp3") {
             let mut bytes = Vec::new();
             audio_file.read_to_end(&mut bytes)?;
             bytes
         } else {
-            return Err(AudioEngineError::IoFailure { message: "Missing audio.mp3".to_string() });
+            return Err(AudioEngineError::IoFailure {
+                message: "Missing required audio.mp3 file".to_string(),
+            });
         };
 
-        let mut track_lock = self.current_track.lock().unwrap();
-        *track_lock = Some(range_track);
+        // 3. Decrypt Payload Stream
+        // --- FIX: Remove the .split_at(12) logic! ---
+        let cipher = ChaCha20Poly1305::new(SECRET_KEY.into());
+
+        // Use the same static nonce asset you used during package compilation
+        let static_nonce_bytes = b"xbible_media";
+        let nonce = Nonce::from_slice(static_nonce_bytes);
+
+        // Decrypt the raw, complete encrypted payload
+        let decrypted_audio_bytes = cipher
+            .decrypt(nonce, encrypted_audio_bytes.as_slice())
+            .map_err(|e| AudioEngineError::DecryptionFailure {
+                message: e.to_string(),
+            })?;
+
+        // Cache the newly verified data structures in memory locks
+        let mut tree_lock = self.current_tree.lock().unwrap();
+        *tree_lock = Some(root_tree);
 
         let mut audio_lock = self.loaded_audio_bytes.lock().unwrap();
-        *audio_lock = Some(audio_bytes.clone());
+        *audio_lock = Some(decrypted_audio_bytes.clone());
 
-        Ok(audio_bytes)
+        Ok(decrypted_audio_bytes)
     }
 
-    pub fn update_playback_sync(&self, current_time_ms: i64, is_playing: bool) -> Option<PlaybackState> {
-        let track_lock = self.current_track.lock().unwrap();
-        let track = track_lock.as_ref()?;
-        let active_anchor_index = track.current_anchor_index(current_time_ms);
+    /// Exposes the completely parsed structure tree down to Swift for native navigation menus.
+    pub fn get_navigation_tree(&self) -> Option<AudioNode> {
+        let tree_lock = self.current_tree.lock().unwrap();
+        tree_lock.clone()
+    }
 
-        let active_text = if active_anchor_index >= 0 && (active_anchor_index as usize) < track.anchors.len() {
-            track.anchors[active_anchor_index as usize].text.clone()
-        } else {
-            String::new()
-        };
+    /// Synchronizes playback ticks down to structural matches dynamically.
+    pub fn update_playback_sync(
+        &self,
+        current_time_ms: i64,
+        is_playing: bool,
+    ) -> Option<PlaybackState> {
+        let tree_lock = self.current_tree.lock().unwrap();
+        let root_node = tree_lock.as_ref()?;
+
+        // Walk down the hierarchy to search for the active matching verse anchor node
+        let mut active_text = String::new();
+        let mut active_index = -1;
+
+        if let Some(matching_verse) = find_active_verse_leaf(root_node, current_time_ms) {
+            active_text = matching_verse.text.clone().unwrap_or_default();
+            // Optional extraction parsing if your index requirements map strictly to standard flattening lists
+            active_index = 1;
+        }
 
         Some(PlaybackState {
             current_time_ms,
-            active_anchor_index,
+            active_anchor_index: active_index,
             active_text,
             is_playing,
         })
     }
 }
 
-// --- 2. THE STANDARD RUST INTERNAL IMPLEMENTATION BLOCK ---
-// This is invisible to UniFFI. You can use standard Rust types like Path without issues.
+// --- STANDARD INTERNAL HELPERS ---
+
 impl AudioEngine {
     fn read_module_metadata_peek(&self, file_path: &Path) -> Option<ModuleMetadata> {
         let file = File::open(file_path).ok()?;
         let mut archive = zip::ZipArchive::new(file).ok()?;
         let mut meta_file = archive.by_name("metadata.json").ok()?;
-        
         let mut contents = String::new();
         meta_file.read_to_string(&mut contents).ok()?;
         serde_json::from_str(&contents).ok()
     }
+
+    /// Extracts artwork bytes, with a strict fallback sequence if metadata misses it
+    pub fn extract_artwork_bytes(&self, file_path: String) -> Option<Vec<u8>> {
+        let path = Path::new(&file_path);
+        let file = File::open(path).ok()?;
+        let mut archive = zip::ZipArchive::new(file).ok()?;
+
+        // --- STRATEGY 1: Try reading from metadata.json first ---
+        // We isolate this variable out here so it survives past the metadata file borrow scope
+        let mut target_artwork_name: Option<String> = None;
+
+        // Scope block to explicitly isolate and drop the metadata file borrow
+        {
+            if let Ok(mut meta_file) = archive.by_name("metadata.json") {
+                let mut contents = String::new();
+                if meta_file.read_to_string(&mut contents).is_ok() {
+                    if let Ok(metadata) = serde_json::from_str::<ModuleMetadata>(&contents) {
+                        target_artwork_name = metadata.artwork_file;
+                    }
+                }
+            }
+        } // 🌟 'meta_file' drops here! The borrow on 'archive' is completely released.
+
+        // Now we can safely borrow 'archive' again without conflicts
+        if let Some(artwork_name) = target_artwork_name {
+            if let Ok(mut image_file) = archive.by_name(&artwork_name) {
+                let mut buffer = Vec::new();
+                if image_file.read_to_end(&mut buffer).is_ok() {
+                    return Some(buffer);
+                }
+            }
+        }
+
+        // --- STRATEGY 2: Fallback scan if metadata failed or field was empty ---
+        let common_fallbacks = [
+            "artwork.jpg",
+            "artwork.jpeg",
+            "artwork.png",
+            "cover.jpg",
+            "cover.jpeg",
+            "cover.png",
+            "image.jpg",
+            "image.png",
+        ];
+
+        for filename in common_fallbacks.iter() {
+            if let Ok(mut image_file) = archive.by_name(filename) {
+                let mut buffer = Vec::new();
+                if image_file.read_to_end(&mut buffer).is_ok() {
+                    return Some(buffer);
+                }
+            }
+        }
+
+        // --- STRATEGY 3: Ultra-lenient fallback (Grab the first image format inside) ---
+        for i in 0..archive.len() {
+            if let Ok(mut file) = archive.by_index(i) {
+                let name = file.name().to_lowercase();
+                if name.ends_with(".jpg")
+                    || name.ends_with(".jpeg")
+                    || name.ends_with(".png")
+                    || name.ends_with(".webp")
+                {
+                    let mut buffer = Vec::new();
+                    if file.read_to_end(&mut buffer).is_ok() {
+                        return Some(buffer);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+}
+
+/// Helper algorithm that recursively walks down the tree structures searching for time intersections
+fn find_active_verse_leaf<'a>(node: &'a AudioNode, time_ms: i64) -> Option<&'a AudioNode> {
+    if let (Some(start), Some(end)) = (node.start_ms, node.end_ms) {
+        if time_ms >= start && time_ms <= end {
+            if node.children.is_empty() {
+                return Some(node);
+            }
+            for child in &node.children {
+                if let Some(found) = find_active_verse_leaf(child, time_ms) {
+                    return Some(found);
+                }
+            }
+            return Some(node);
+        }
+    } else {
+        // If the container node has no timestamp context, inspect all its structural children explicitly
+        for child in &node.children {
+            if let Some(found) = find_active_verse_leaf(child, time_ms) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
