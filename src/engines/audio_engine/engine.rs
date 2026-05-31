@@ -93,7 +93,7 @@ pub struct PlaybackState {
     pub active_anchor_index: i32,
     pub active_text: String,
     pub is_playing: bool,
-    pub repeat_mode: RepeatMode, // 🌟 EXPOSED STATE
+    pub repeat_mode: RepeatMode,
 }
 
 // --- INTERNAL PLAYBACK MUTABLE STATE MACHINE ---
@@ -111,7 +111,7 @@ struct InternalPlaybackState {
 pub struct AudioEngine {
     current_tree: Mutex<Option<AudioNode>>,
     loaded_audio_bytes: Mutex<Option<Vec<u8>>>,
-    playback_state: Mutex<InternalPlaybackState>, // 🌟 State container loop
+    playback_state: Mutex<InternalPlaybackState>,
 }
 
 #[uniffi::export]
