@@ -16,6 +16,7 @@ pub struct TaskStatus {
     pub message: String,
 }
 
+#[derive(Debug, Clone)]
 pub struct TaskData {
     pub(crate) status: TaskStatus,
     pub(crate) result_modules: Vec<SwordModule>,

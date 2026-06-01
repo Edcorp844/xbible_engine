@@ -10,7 +10,7 @@ use crate::engines::xbible_engine::xbible_engine_extensions::xbible_engine_task_
 
 /// High-level Bible API abstraction layer for UniFFI export
 /// Provides a clean interface for Swift and other languages to interact with Bible modules
-#[derive(uniffi::Object)]
+#[derive(Debug,uniffi::Object)]
 pub struct XBibleEngine {
     pub(crate) module_engine: Arc<ModuleEngine>,
     pub(crate) tasks: Arc<Mutex<HashMap<String, TaskData>>>,

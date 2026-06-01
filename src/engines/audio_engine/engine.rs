@@ -97,7 +97,7 @@ pub struct PlaybackState {
 }
 
 // --- INTERNAL PLAYBACK MUTABLE STATE MACHINE ---
-
+#[derive(Debug, Clone, uniffi::Record)]
 struct InternalPlaybackState {
     current_time_ms: i64,
     is_playing: bool,
@@ -107,7 +107,7 @@ struct InternalPlaybackState {
 
 // --- AUDIO ENGINE COORDINATOR ---
 
-#[derive(uniffi::Object)]
+#[derive(Debug, uniffi::Object)]
 pub struct AudioEngine {
     current_tree: Mutex<Option<AudioNode>>,
     loaded_audio_bytes: Mutex<Option<Vec<u8>>>,
