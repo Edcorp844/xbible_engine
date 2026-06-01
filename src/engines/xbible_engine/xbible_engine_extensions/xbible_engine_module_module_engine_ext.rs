@@ -489,4 +489,9 @@ impl XBibleEngine {
             .filter(|m| m.language.contains(language_code))
             .collect()
     }
+
+    /// Get a single module entry by name
+    pub fn get_single_entry(&self, sword_module: &SwordModule, reference: &str) -> Vec<Section>{
+        self.module_engine.get_single_entry(Some(sword_module), reference)
+    }
 }
