@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+
     // 1. --- BUILD THE SWORD ENGINE ---
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let config_file = root.join("cpp-bindings.toml");
@@ -46,18 +48,49 @@ fn main() {
         clone_dir
     };
 
-    let dst = cmake::Config::new(&sword_src)
+    // --- CRITICAL FIX 1: Neutralize broken utilities bundle installation rules ---
+    let utils_cmake_path = sword_src.join("utilities").join("CMakeLists.txt");
+    if utils_cmake_path.exists() {
+        fs::write(&utils_cmake_path, "")
+            .expect("Failed to clear out utilities/CMakeLists.txt file to prevent iOS bundle errors.");
+    }
+
+    // --- CRITICAL FIX 2: Inject missing GLOBALREF/GLOBALDEF fallback layout directly in header file ---
+    let ftplib_header_path = sword_src.join("include").join("ftplib.h");
+    if ftplib_header_path.exists() {
+        let mut content = fs::read_to_string(&ftplib_header_path)
+            .expect("Failed to read sword/include/ftplib.h");
+        
+        if !content.contains("#ifndef GLOBALREF") {
+            let fallback_macro = concat!(
+                "#ifndef GLOBALREF\n#define GLOBALREF extern\n#endif\n",
+                "#ifndef GLOBALDEF\n#define GLOBALDEF\n#endif\n\n"
+            );
+            content.insert_str(0, fallback_macro);
+            fs::write(&ftplib_header_path, content)
+                .expect("Failed to patch sword/include/ftplib.h with fallback layout macros.");
+        }
+    }
+
+    let mut cmake_config = cmake::Config::new(&sword_src);
+    cmake_config
         .define("SWORD_BUILD_SHARED", "OFF")
         .define("SWORD_BUILD_EXAMPLES", "OFF")
         .define("SWORD_BUILD_TESTS", "OFF")
-        .build();
+        .define("SWORD_BUILD_UTILS", "OFF");
+
+    // --- CRITICAL FIX 3: Force Clang to pass standard Unix platform identifiers on Apple Targets ---
+    if target_os == "ios" || target_os == "macos" {
+        cmake_config.cflag("-D__unix__");
+        cmake_config.cxxflag("-D__unix__");
+    }
+
+    let dst = cmake_config.build();
 
     println!("cargo:rustc-link-search=native={}/lib", dst.display());
     println!("cargo:rustc-link-lib=static=sword");
 
     // 2. --- LINK SYSTEM DEPENDENCIES PER OS ---
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
-
     match target_os.as_str() {
         "windows" => {
             println!("cargo:rustc-link-lib=static=z");
@@ -70,6 +103,15 @@ fn main() {
         }
         "macos" => {
             println!("cargo:rustc-link-lib=dylib=curl");
+            println!("cargo:rustc-link-lib=dylib=z");
+            println!("cargo:rustc-link-lib=dylib=bz2");
+            println!("cargo:rustc-link-lib=dylib=lzma");
+            println!("cargo:rustc-link-lib=dylib=c++");
+            println!("cargo:rustc-link-lib=framework=CoreFoundation");
+            println!("cargo:rustc-link-lib=framework=Security");
+        }
+        "ios" => {
+            // Omit curl on iOS targets to avoid missing simulator SDK symbols
             println!("cargo:rustc-link-lib=dylib=z");
             println!("cargo:rustc-link-lib=dylib=bz2");
             println!("cargo:rustc-link-lib=dylib=lzma");
