@@ -98,27 +98,53 @@ pub enum StoreApiError {
     IoFailure { message: String },
 }
 
-// ─── FFI-COMPLIANT PROGRESSION PROXY OBJECT ───
+// ─── INTERNAL PURE-RUST CALLBACK TRAIT ───
+// This does NOT have any UniFFI attributes, making it completely invisible 
+// to the UniFFI compiler and free from TypeId constraints.
+pub trait RustDownloadProgressHandler: Send + Sync {
+    fn on_progress(&self, unique_id: String, bytes_written: u64, total_bytes: Option<u64>);
+}
 
+// ─── FFI-COMPLIANT PROGRESSION PROXY OBJECT ───
 #[derive(uniffi::Object)]
 pub struct StoreDownloadProgressListener {
-    // We drop the Box<dyn Fn> completely to make UniFFI happy
     pub unique_id_filter: Option<String>,
+    // This hidden field allows local Rust tools/services to inject functional processing
+    pub rust_handler: Option<Arc<dyn RustDownloadProgressHandler>>,
 }
 
 #[uniffi::export]
 impl StoreDownloadProgressListener {
     #[uniffi::constructor]
     pub fn new(unique_id_filter: Option<String>) -> Self {
-        Self { unique_id_filter }
+        Self { 
+            unique_id_filter,
+            rust_handler: None, 
+        }
     }
 
-    // This method is called from Swift or Rust to dispatch telemetry updates
     pub fn on_progress(&self, unique_id: String, bytes_written: u64, total_bytes: Option<u64>) {
-        // Handled natively via UniFFI messaging patterns or overridden on the foreign language boundary
+        // Forward the notification out to our custom Rust engine hook if it exists
+        if let Some(ref handler) = self.rust_handler {
+            handler.on_progress(unique_id, bytes_written, total_bytes);
+        }
     }
 }
 
+// Helper implementation for manual, native initialization inside your local rust apps
+impl StoreDownloadProgressListener {
+    pub fn new_native(
+        unique_id_filter: Option<String>, 
+        handler: Arc<dyn RustDownloadProgressHandler>
+    ) -> Self {
+        Self {
+            unique_id_filter,
+            rust_handler: Some(handler),
+        }
+    }
+}
+
+// ─── ENGINE CLIENT IMPLEMENTATION ───
 #[uniffi::export]
 impl StoreApiClient {
     #[uniffi::constructor]
