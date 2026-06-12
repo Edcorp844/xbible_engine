@@ -7,3 +7,6 @@ header = "include/sword/flatapi.h"
 lib_name = "sword"
 use_cmake = true
 link_kind = "static"
+
+# --- AUTOMATED INTEGRATION DEPENDENCIES ---
+curl_ios_toolchain_url = "https://github.com/jasonacox/Build-OpenSSL-cURL.git"

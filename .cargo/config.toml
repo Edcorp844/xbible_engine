@@ -1,0 +1,5 @@
+[target.aarch64-apple-ios]
+env = { IPHONEOS_DEPLOYMENT_TARGET = "14.0" }
+
+[target.aarch64-apple-ios-sim]
+env = { IPHONEOS_DEPLOYMENT_TARGET = "14.0" }

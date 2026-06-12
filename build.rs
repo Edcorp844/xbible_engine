@@ -1,163 +1,328 @@
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+fn run(cmd: &mut Command, description: &str) {
+    let status = cmd
+        .status()
+        .unwrap_or_else(|e| panic!("Failed to spawn `{}`: {}", description, e));
+    assert!(
+        status.success(),
+        "`{}` exited with status {}",
+        description,
+        status
+    );
+}
+
+fn git_clone(url: &str, dest: &Path, extra_args: &[&str]) {
+    if dest.exists() {
+        return;
+    }
+    let mut cmd = Command::new("git");
+    cmd.arg("clone").arg("--depth").arg("1");
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    cmd.arg(url).arg(dest);
+    run(&mut cmd, &format!("git clone {}", url));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Patch SWORD CMakeLists
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn patch_sword_cmakelists(sword_src: &Path, target_os: &str, sdk_include_path: Option<&str>) {
+    // Disable utilities
+    let _ = fs::write(
+        sword_src.join("utilities/CMakeLists.txt"),
+        "# disabled by build.rs\n",
+    );
+
+    // Fix ftplib.h
+    let ftplib = sword_src.join("include/ftplib.h");
+    if ftplib.exists() {
+        if let Ok(mut src) = fs::read_to_string(&ftplib) {
+            if !src.contains("#ifndef GLOBALREF") {
+                src.insert_str(0, "#ifndef GLOBALREF\n#define GLOBALREF extern\n#endif\n#ifndef GLOBALDEF\n#define GLOBALDEF\n#endif\n\n");
+                let _ = fs::write(&ftplib, src);
+            }
+        }
+    }
+
+    let cmake_path = sword_src.join("CMakeLists.txt");
+    if let Ok(content) = fs::read_to_string(&cmake_path) {
+        let mut patched = content;
+
+        // Remove any previous macro definitions that may cause recursion
+        patched = patched.replace(
+            "macro(add_subdirectory",
+            "# macro(add_subdirectory removed by build.rs",
+        );
+        patched = patched.replace("endmacro()", "# endmacro() removed");
+
+        // Bypass FindCURL
+        patched = patched.replace(
+            "find_package(CURL)",
+            "# bypassed by build.rs\nset(CURL_FOUND TRUE)",
+        );
+        patched = patched.replace(
+            "FIND_PACKAGE(CURL)",
+            "# bypassed by build.rs\nset(CURL_FOUND TRUE)",
+        );
+
+        // Force CURL ON
+        if !patched.contains("SWORD_CURL") {
+            patched = patched.replace(
+                "project(",
+                "option(SWORD_CURL \"Enable network support\" ON)\n\nproject(",
+            );
+        }
+
+        if target_os == "ios" {
+            patched = patched.replace("SHARED", "STATIC");
+            patched = patched.replace("add_library(sword ", "add_library(sword STATIC ");
+            patched = patched.replace("add_library( sword ", "add_library(sword STATIC ");
+
+            patched = patched.replace("sword sword_static", "sword_static");
+            patched = patched.replace(
+                "TARGETS sword DESTINATION",
+                "TARGETS sword_static DESTINATION",
+            );
+
+            if let Some(inc) = sdk_include_path {
+                let injection = format!("include_directories(\"{}\")\n", inc);
+                if !patched.contains(&injection) {
+                    patched = injection + &patched;
+                }
+            }
+        }
+
+        // Safe overrides at the top
+        let header = r#"cmake_minimum_required(VERSION 3.10)
+
+set(SWORD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(SWORD_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(SWORD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(SWORD_BUILD_UTILS OFF CACHE BOOL "" FORCE)
+set(SWORD_CURL ON CACHE BOOL "" FORCE)
+set(CURL_FOUND TRUE CACHE BOOL "" FORCE)
+set(NOTESTS TRUE)
+"#;
+
+        patched = header.to_string() + &patched;
+        let _ = fs::write(&cmake_path, patched);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Main
+// ─────────────────────────────────────────────────────────────────────────────
 
 fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+    let target_triple = env::var("TARGET").unwrap();
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // 1. --- BUILD THE SWORD ENGINE ---
-    let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let config_file = root.join("cpp-bindings.toml");
+    // Read config
+    let cfg_text = fs::read_to_string(manifest_dir.join("cpp-bindings.toml"))
+        .expect("cpp-bindings.toml not found");
+    let cfg: toml::Value = cfg_text.parse().expect("Failed to parse cpp-bindings.toml");
 
-    let config_text = fs::read_to_string(&config_file)
-        .expect("Failed to read cpp-bindings.toml; please add it to the repository.");
-    let config = config_text
-        .parse::<toml::Value>()
-        .expect("Failed to parse cpp-bindings.toml");
-
-    let git_url = config
-        .get("git_url")
-        .and_then(|value| value.as_str())
-        .expect("git_url is required in cpp-bindings.toml");
-
-    let git_rev = config
+    let git_url = cfg["git_url"].as_str().unwrap();
+    let git_rev = cfg
         .get("git_rev")
-        .and_then(|value| value.as_str())
+        .and_then(|v| v.as_str())
         .unwrap_or("HEAD");
 
-    let sword_src = root.join("sword");
-    let sword_src = if sword_src.exists() {
-        sword_src
-    } else {
-        let clone_dir = root.join("target").join("sword");
-        if !clone_dir.exists() {
-            let mut clone = Command::new("git");
-            clone.arg("clone");
-            if git_rev != "HEAD" {
-                clone.arg("--depth").arg("1").arg("--branch").arg(git_rev);
-            } else {
-                clone.arg("--depth").arg("1");
-            }
-            clone.arg(git_url).arg(&clone_dir);
-            let status = clone.status().expect("Failed to run git clone");
-            if !status.success() {
-                panic!("git clone failed with status {}", status);
-            }
-        }
-        clone_dir
-    };
-
-    // --- CRITICAL FIX 1: Neutralize broken utilities bundle installation rules ---
-    let utils_cmake_path = sword_src.join("utilities").join("CMakeLists.txt");
-    if utils_cmake_path.exists() {
-        fs::write(&utils_cmake_path, "")
-            .expect("Failed to clear out utilities/CMakeLists.txt file to prevent iOS bundle errors.");
+    // Clone SWORD
+    let sword_src = out_dir.join("sword_source_isolated");
+    if !sword_src.exists() {
+        let branch_args: &[&str] = if git_rev != "HEAD" {
+            &["--branch", git_rev]
+        } else {
+            &[]
+        };
+        git_clone(git_url, &sword_src, branch_args);
     }
 
-    // --- CRITICAL FIX 2: Inject missing GLOBALREF/GLOBALDEF fallback layout directly in header file ---
-    let ftplib_header_path = sword_src.join("include").join("ftplib.h");
-    if ftplib_header_path.exists() {
-        let mut content = fs::read_to_string(&ftplib_header_path)
-            .expect("Failed to read sword/include/ftplib.h");
-        
-        if !content.contains("#ifndef GLOBALREF") {
-            let fallback_macro = concat!(
-                "#ifndef GLOBALREF\n#define GLOBALREF extern\n#endif\n",
-                "#ifndef GLOBALDEF\n#define GLOBALDEF\n#endif\n\n"
-            );
-            content.insert_str(0, fallback_macro);
-            fs::write(&ftplib_header_path, content)
-                .expect("Failed to patch sword/include/ftplib.h with fallback layout macros.");
-        }
+    // iOS SDK detection
+    let mut sdk_inc_path: Option<String> = None;
+    let mut sdk_name_flag: Option<String> = None;
+
+    if target_os == "ios" {
+        let is_sim = target_triple.contains("sim");
+        let sdk_name = if is_sim {
+            "iphonesimulator"
+        } else {
+            "iphoneos"
+        };
+        sdk_name_flag = Some(sdk_name.to_string());
+
+        let sdk_output = Command::new("xcrun")
+            .args(["--sdk", sdk_name, "--show-sdk-path"])
+            .output()
+            .expect("xcrun failed");
+
+        let sdk_path_str = String::from_utf8_lossy(&sdk_output.stdout)
+            .trim()
+            .to_string();
+        let sdk_usr = Path::new(&sdk_path_str).join("usr");
+        sdk_inc_path = Some(sdk_usr.join("include").to_string_lossy().into_owned());
     }
 
-    let mut cmake_config = cmake::Config::new(&sword_src);
-    cmake_config
+    patch_sword_cmakelists(&sword_src, &target_os, sdk_inc_path.as_deref());
+
+    // CMake setup
+    let mut cmake = cmake::Config::new(&sword_src);
+
+    cmake
         .define("SWORD_BUILD_SHARED", "OFF")
+        .define("BUILD_SHARED_LIBS", "OFF")
         .define("SWORD_BUILD_EXAMPLES", "OFF")
         .define("SWORD_BUILD_TESTS", "OFF")
-        .define("SWORD_BUILD_UTILS", "OFF");
+        .define("SWORD_BUILD_UTILS", "OFF")
+        .define("SWORD_CURL", "ON");
 
-    // --- CRITICAL FIX 3: Force Clang to pass standard Unix platform identifiers on Apple Targets ---
-    if target_os == "ios" || target_os == "macos" {
-        cmake_config.cflag("-D__unix__");
-        cmake_config.cxxflag("-D__unix__");
+    if let Some(inc) = &sdk_inc_path {
+        let flags = format!("-I{} -fPIC", inc);
+        cmake
+            .env("CFLAGS", &flags)
+            .env("CXXFLAGS", &flags)
+            .cflag(&flags)
+            .cxxflag(&flags);
     }
 
-    let dst = cmake_config.build();
+    match target_os.as_str() {
+        "ios" => {
+            let sdk_name = sdk_name_flag.unwrap();
+            let sdk_inc = sdk_inc_path.unwrap();
+
+            // 1. Detect if we are building for device or simulator
+            let target_triple = std::env::var("TARGET").unwrap_or_default();
+            let is_simulator = target_triple.contains("ios-sim");
+
+            // 2. Select and append the exact matching deployment target payload
+            println!("cargo:rustc-link-arg=-target");
+            if is_simulator {
+                println!("cargo:rustc-link-arg=arm64-apple-ios14.0.0-simulator");
+            } else {
+                println!("cargo:rustc-link-arg=arm64-apple-ios14.0.0");
+            }
+
+            // Pull the arch string and correct 'aarch64' to Apple's 'arm64'
+            let raw_arch =
+                std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "arm64".to_string());
+            let arch = if raw_arch == "aarch64" {
+                "arm64"
+            } else {
+                &raw_arch
+            };
+
+            cmake
+                .define("CMAKE_OSX_SYSROOT", sdk_name)
+                .define("CMAKE_SYSTEM_NAME", "iOS")
+                .define("CMAKE_OSX_ARCHITECTURES", arch)
+                .define("CURL_FOUND", "TRUE")
+                .define("CURL_INCLUDE_DIR", &sdk_inc)
+                .define("CURL_INCLUDE_DIRS", &sdk_inc)
+                // CHANGE THIS LINE: Change "-lcurl" to ""
+                .define("CURL_LIBRARIES", "")
+                .define("CMAKE_INCLUDE_PATH", &sdk_inc)
+                .cflag("-D__unix__")
+                .cxxflag("-D__unix__");
+
+            // Framework bindings
+            println!("cargo:rustc-link-lib=dylib=z");
+            println!("cargo:rustc-link-lib=dylib=bz2");
+            println!("cargo:rustc-link-lib=dylib=c++");
+            println!("cargo:rustc-link-lib=framework=CFNetwork");
+            println!("cargo:rustc-link-lib=framework=CoreFoundation");
+            println!("cargo:rustc-link-lib=framework=Security");
+            println!("cargo:rustc-link-lib=framework=SystemConfiguration");
+        }
+        "macos" => {
+            cmake.cflag("-D__unix__").cxxflag("-D__unix__");
+        }
+        "android" => {
+            if let Ok(ndk) = env::var("ANDROID_NDK_HOME") {
+                let tc = Path::new(&ndk).join("build/cmake/android.toolchain.cmake");
+                if tc.exists() {
+                    cmake.define("CMAKE_TOOLCHAIN_FILE", tc.to_str().unwrap());
+                }
+                let abi = if target_triple.contains("x86_64") {
+                    "x86_64"
+                } else {
+                    "arm64-v8a"
+                };
+                cmake
+                    .define("ANDROID_ABI", abi)
+                    .define("ANDROID_PLATFORM", "android-21");
+            }
+        }
+        _ => {}
+    }
+
+    let dst = cmake.build();
 
     println!("cargo:rustc-link-search=native={}/lib", dst.display());
     println!("cargo:rustc-link-lib=static=sword");
 
-    // 2. --- LINK SYSTEM DEPENDENCIES PER OS ---
+    // Platform-specific linking
     match target_os.as_str() {
-        "windows" => {
-            println!("cargo:rustc-link-lib=static=z");
-            println!("cargo:rustc-link-lib=static=bz2");
-            println!("cargo:rustc-link-lib=static=lzma");
-            println!("cargo:rustc-link-lib=dylib=curl");
-            println!("cargo:rustc-link-lib=dylib=ws2_32");
-            println!("cargo:rustc-link-lib=dylib=crypt32");
-            println!("cargo:rustc-link-lib=dylib=stdc++");
+        "ios" => {
+            println!("cargo:rustc-link-lib=dylib=z");
+            println!("cargo:rustc-link-lib=dylib=bz2");
+            println!("cargo:rustc-link-lib=dylib=c++");
+            println!("cargo:rustc-link-lib=framework=CFNetwork");
+            println!("cargo:rustc-link-lib=framework=CoreFoundation");
+            println!("cargo:rustc-link-lib=framework=Security");
+            println!("cargo:rustc-link-lib=framework=SystemConfiguration");
         }
         "macos" => {
             println!("cargo:rustc-link-lib=dylib=curl");
             println!("cargo:rustc-link-lib=dylib=z");
             println!("cargo:rustc-link-lib=dylib=bz2");
-            println!("cargo:rustc-link-lib=dylib=lzma");
             println!("cargo:rustc-link-lib=dylib=c++");
             println!("cargo:rustc-link-lib=framework=CoreFoundation");
             println!("cargo:rustc-link-lib=framework=Security");
         }
-        "ios" => {
-            // Omit curl on iOS targets to avoid missing simulator SDK symbols
-            println!("cargo:rustc-link-lib=dylib=z");
-            println!("cargo:rustc-link-lib=dylib=bz2");
-            println!("cargo:rustc-link-lib=dylib=lzma");
-            println!("cargo:rustc-link-lib=dylib=c++");
-            println!("cargo:rustc-link-lib=framework=CoreFoundation");
-            println!("cargo:rustc-link-lib=framework=Security");
-        }
-        _ => {
-            let icu_uc = pkg_config::Config::new().probe("icu-uc").unwrap();
-            let icu_i18n = pkg_config::Config::new().probe("icu-i18n").unwrap();
-
-            for lib_path in icu_uc.link_paths.iter().chain(icu_i18n.link_paths.iter()) {
-                println!("cargo:rustc-link-search=native={}", lib_path.display());
-            }
-            for lib in icu_uc.libs.iter().chain(icu_i18n.libs.iter()) {
-                println!("cargo:rustc-link-lib=dylib={}", lib);
-            }
-
+        "android" => {
             println!("cargo:rustc-link-lib=dylib=curl");
             println!("cargo:rustc-link-lib=dylib=z");
-            println!("cargo:rustc-link-lib=dylib=bz2");
-            println!("cargo:rustc-link-lib=dylib=lzma");
+            println!("cargo:rustc-link-lib=dylib=c++_shared");
+            println!("cargo:rustc-link-lib=dylib=log");
+        }
+        _ => {
+            println!("cargo:rustc-link-lib=dylib=curl");
+            println!("cargo:rustc-link-lib=dylib=z");
             println!("cargo:rustc-link-lib=dylib=stdc++");
         }
     }
 
-    // 3. --- GENERATE BINDINGS ---
-    let include_path = dst.join("include");
-    let header_path = include_path.join("sword").join("flatapi.h");
+    // Bindgen
+    let include_dir = dst.join("include");
+    let header = include_dir.join("sword/flatapi.h");
 
-    let Ok(target_version) = bindgen::RustTarget::stable(96, 0) else {
-        panic!("The specified Rust version is not recognized by your bindgen version.");
-    };
-
-    let bindings = bindgen::Builder::default()
-        .header(header_path.to_str().expect("Could not find flatapi.h"))
-        .clang_arg(format!("-I{}", include_path.display()))
+    let mut builder = bindgen::Builder::default()
+        .header(header.to_str().unwrap())
+        .clang_arg(format!("-I{}", include_dir.display()))
         .allowlist_function("org_crosswire_sword.*")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
-        .rust_target(target_version)
-        .wrap_unsafe_ops(true)
-        .generate()
-        .expect("Unable to generate bindings");
+        .rust_target(bindgen::RustTarget::stable(96, 0).unwrap())
+        .wrap_unsafe_ops(true);
 
-    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-    bindings
-        .write_to_file(out_path.join("bindings.rs"))
-        .expect("Couldn't write bindings!");
+    if target_os == "ios" || target_os == "macos" {
+        if let Ok(sdk) = env::var("SDKROOT") {
+            builder = builder.clang_arg(format!("--sysroot={}", sdk));
+        }
+    }
+
+    builder
+        .generate()
+        .expect("bindgen failed")
+        .write_to_file(out_dir.join("bindings.rs"))
+        .expect("Failed to write bindings.rs");
 }

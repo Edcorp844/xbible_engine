@@ -1,0 +1,16 @@
+{
+  "unique_id": "eng-kjv-ephesians3",
+  "display_title": "The Letter of Paul the Apostle to the Ephesians (KJV)",
+  "version": 1,
+  "language": "English",
+  "contributor": "Alexander Scourby",
+  "description": "Audio narration tracking layer for Ephesians.",
+  "source_url": "https://example.com/audio/ephesians.mp3",
+  "duration_ms": 1119420,
+  "features": [
+    "chapter",
+    "verse",
+    "narration"
+  ],
+  "artwork_file": "artwork.jpg"
+}
