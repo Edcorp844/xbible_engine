@@ -7,6 +7,7 @@ use crate::engines::audio_engine::store::store_api_client::{
     ModuleStatus, RemoteAudioModuleInfo, StoreApiClient, StoreApiError, 
     StoreDownloadProgressListener, RustDownloadProgressHandler,
 };
+use crate::runtime::get_shared_runtime;
 
 // ─── LOCAL TRAIT IMPLEMENTOR STRUCT ───
 // We define a lightweight structural container to bridge the progress closure 
@@ -24,14 +25,16 @@ impl RustDownloadProgressHandler for ServiceProgressProxy {
             _ => 0.0,
         };
 
-        // 1. Update our internal repository cache layers
-        if let Ok(mut cache) = self.cached_modules.lock() {
-            if let Some(module) = cache.iter_mut().find(|m| m.unique_id == self.module_id) {
-                module.status = ModuleStatus::Downloading { progress };
+        // Scope the mutex lock safely using a short block code block
+        {
+            if let Ok(mut cache) = self.cached_modules.lock() {
+                if let Some(module) = cache.iter_mut().find(|m| m.unique_id == self.module_id) {
+                    module.status = ModuleStatus::Downloading { progress };
+                }
             }
-        }
+        } // <-- The lock falls out of scope and drops completely here!
 
-        // 2. FIX: Call the public .on_progress method instead of looking for an absent .callback field
+        // Now safe to pass up without holding onto the repository internal lock
         self.upstream_listener.on_progress(unique_id, bytes_written, total_bytes);
     }
 }
@@ -69,27 +72,32 @@ impl StoreApiService {
         path.to_string_lossy().into_owned()
     }
 
-    pub async fn load_catalog(&self) -> Result<Vec<RemoteAudioModuleInfo>, StoreApiError> {
-        let client = self.get_client();
-        let mut modules = client.fetch_audio_modules().await?;
-        
-        let target_dir = self.get_audio_modules_path();
-        let target_path = Path::new(&target_dir);
+    // ─── BRIDGED EXECUTION ENVELOPE ───
+    // We convert the top-level FFI-exported boundary to a synchronous function 
+    // signature and cleanly dispatch it inside our dedicated Tokio block runner.
+    pub fn load_catalog(&self) -> Result<Vec<RemoteAudioModuleInfo>, StoreApiError> {
+        get_shared_runtime().block_on(async {
+            let client = self.get_client();
+            let mut modules = client.fetch_audio_modules().await?;
+            
+            let target_dir = self.get_audio_modules_path();
+            let target_path = Path::new(&target_dir);
 
-        for module in &mut modules {
-            let file_name = format!("{}_v{}.xba", module.unique_id, module.version);
-            module.status = if target_path.join(file_name).exists() {
-                ModuleStatus::Installed
-            } else {
-                ModuleStatus::Idle
-            };
-        }
+            for module in &mut modules {
+                let file_name = format!("{}_v{}.xba", module.unique_id, module.version);
+                module.status = if target_path.join(file_name).exists() {
+                    ModuleStatus::Installed
+                } else {
+                    ModuleStatus::Idle
+                };
+            }
 
-        if let Ok(mut cache) = self.cached_modules.lock() {
-            *cache = modules.clone();
-        }
+            if let Ok(mut cache) = self.cached_modules.lock() {
+                *cache = modules.clone();
+            }
 
-        Ok(modules)
+            Ok(modules)
+        })
     }
 
     pub fn get_cached_catalog(&self) -> Vec<RemoteAudioModuleInfo> {
@@ -100,46 +108,47 @@ impl StoreApiService {
         }
     }
 
-    pub async fn install_module(
+    // ─── BRIDGED EXECUTION ENVELOPE ───
+    pub fn install_module(
         &self,
         module_id: String,
         progress_listener: Arc<StoreDownloadProgressListener>,
     ) -> Result<String, StoreApiError> {
-        let target_module = {
-            let cache = self.cached_modules.lock().unwrap();
-            cache.iter().find(|m| m.unique_id == module_id).cloned()
-        }
-        .ok_or_else(|| StoreApiError::SerializationFailure {
-            message: format!("Module {} not found in cache.", module_id),
-        })?;
-
-        let target_dir = self.get_audio_modules_path();
-        
-        // Build our concrete structure type instance instead of a raw closure block
-        let proxy_handler = Arc::new(ServiceProgressProxy {
-            module_id: module_id.clone(),
-            cached_modules: Arc::clone(&self.cached_modules),
-            upstream_listener: Arc::clone(&progress_listener),
-        });
-
-        // Use our non-FFI constructor to securely link the progress listener trait
-        let final_proxy_listener = Arc::new(StoreDownloadProgressListener::new_native(
-            Some(module_id.clone()),
-            proxy_handler,
-        ));
-
-        let client = self.get_client();
-        let saved_path = client
-            .download_and_install_module(target_module, target_dir, final_proxy_listener)
-            .await?;
-
-        if let Ok(mut cache) = self.cached_modules.lock() {
-            if let Some(module) = cache.iter_mut().find(|m| m.unique_id == module_id) {
-                module.status = ModuleStatus::Installed;
-                module.is_installed = true;
+        get_shared_runtime().block_on(async {
+            let target_module = {
+                let cache = self.cached_modules.lock().unwrap();
+                cache.iter().find(|m| m.unique_id == module_id).cloned()
             }
-        }
+            .ok_or_else(|| StoreApiError::SerializationFailure {
+                message: format!("Module {} not found in cache.", module_id),
+            })?;
 
-        Ok(saved_path)
+            let target_dir = self.get_audio_modules_path();
+            
+            let proxy_handler = Arc::new(ServiceProgressProxy {
+                module_id: module_id.clone(),
+                cached_modules: Arc::clone(&self.cached_modules),
+                upstream_listener: Arc::clone(&progress_listener),
+            });
+
+            let final_proxy_listener = Arc::new(StoreDownloadProgressListener::new_native(
+                Some(module_id.clone()),
+                proxy_handler,
+            ));
+
+            let client = self.get_client();
+            let saved_path = client
+                .download_and_install_module(target_module, target_dir, final_proxy_listener)
+                .await?;
+
+            if let Ok(mut cache) = self.cached_modules.lock() {
+                if let Some(module) = cache.iter_mut().find(|m| m.unique_id == module_id) {
+                    module.status = ModuleStatus::Installed;
+                    module.is_installed = true;
+                }
+            }
+
+            Ok(saved_path)
+        })
     }
 }

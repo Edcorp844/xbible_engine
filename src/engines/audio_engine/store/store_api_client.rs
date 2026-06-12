@@ -1,4 +1,3 @@
-use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -98,18 +97,13 @@ pub enum StoreApiError {
     IoFailure { message: String },
 }
 
-// ─── INTERNAL PURE-RUST CALLBACK TRAIT ───
-// This does NOT have any UniFFI attributes, making it completely invisible 
-// to the UniFFI compiler and free from TypeId constraints.
 pub trait RustDownloadProgressHandler: Send + Sync {
     fn on_progress(&self, unique_id: String, bytes_written: u64, total_bytes: Option<u64>);
 }
 
-// ─── FFI-COMPLIANT PROGRESSION PROXY OBJECT ───
 #[derive(uniffi::Object)]
 pub struct StoreDownloadProgressListener {
     pub unique_id_filter: Option<String>,
-    // This hidden field allows local Rust tools/services to inject functional processing
     pub rust_handler: Option<Arc<dyn RustDownloadProgressHandler>>,
 }
 
@@ -124,14 +118,12 @@ impl StoreDownloadProgressListener {
     }
 
     pub fn on_progress(&self, unique_id: String, bytes_written: u64, total_bytes: Option<u64>) {
-        // Forward the notification out to our custom Rust engine hook if it exists
         if let Some(ref handler) = self.rust_handler {
             handler.on_progress(unique_id, bytes_written, total_bytes);
         }
     }
 }
 
-// Helper implementation for manual, native initialization inside your local rust apps
 impl StoreDownloadProgressListener {
     pub fn new_native(
         unique_id_filter: Option<String>, 
@@ -144,7 +136,6 @@ impl StoreDownloadProgressListener {
     }
 }
 
-// ─── ENGINE CLIENT IMPLEMENTATION ───
 #[uniffi::export]
 impl StoreApiClient {
     #[uniffi::constructor]
@@ -161,7 +152,9 @@ impl StoreApiClient {
 
         let client = Client::builder()
             .default_headers(headers)
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_secs(300)) // Generous timeout for large modules
+            .http1_only()                      // Prevents HTTP/2 multiplex frame drops
+            .tcp_keepalive(Duration::from_secs(15))
             .build()
             .unwrap_or_else(|_| Client::new());
 
@@ -202,28 +195,18 @@ impl StoreApiClient {
         let response = request
             .send()
             .await
-            .map_err(|e| StoreApiError::NetworkFailure {
-                message: e.to_string(),
-            })?
+            .map_err(|e| StoreApiError::NetworkFailure { message: e.to_string() })?
             .json::<serde_json::Value>()
             .await
-            .map_err(|e| StoreApiError::SerializationFailure {
-                message: e.to_string(),
-            })?;
+            .map_err(|e| StoreApiError::SerializationFailure { message: e.to_string() })?;
 
-        let data_section =
-            response
-                .get("data")
-                .ok_or_else(|| StoreApiError::SerializationFailure {
-                    message: "No 'data' field in response".to_string(),
-                })?;
+        let data_section = response.get("data").ok_or_else(|| {
+            StoreApiError::SerializationFailure { message: "No 'data' field".to_string() }
+        })?;
 
-        let parsed: HygraphAudioResponse =
-            serde_json::from_value(data_section.clone()).map_err(|e| {
-                StoreApiError::SerializationFailure {
-                    message: e.to_string(),
-                }
-            })?;
+        let parsed: HygraphAudioResponse = serde_json::from_value(data_section.clone()).map_err(|e| {
+            StoreApiError::SerializationFailure { message: e.to_string() }
+        })?;
 
         Ok(parsed.audio_modules)
     }
@@ -249,44 +232,63 @@ impl StoreApiClient {
             return Ok(destination_path.to_string_lossy().into_owned());
         }
 
-        let response = self
+        // 1. Establish the connection handle forcing un-adulterated raw streams
+        let mut response = self
             .client
             .get(&module.source_url)
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
             .send()
             .await
             .map_err(|e| StoreApiError::NetworkFailure {
-                message: e.to_string(),
+                message: format!("GB Handshake initialization failure: {}", e),
             })?;
 
         let total_size = response.content_length();
+        
+        // Scale our progress reporting threshold dynamically for large multi-gigabyte assets
         let chunk_threshold = match total_size {
-            Some(total) if total > 100 => total / 100,
-            _ => 32 * 1024,
+            Some(total) if total > 200 => total / 200, // 0.5% granular steps
+            _ => 64 * 1024,
         };
 
+        // 2. FIX: Create a tightly bounded channel (16 slots)
+        // This caps maximum memory overhead to a few megabytes, completely preventing OOM crashes.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(16);
+
+        // 3. SEPARATED ASYNC NETWORK PUMP
+        tokio::spawn(async move {
+            while let Ok(Some(chunk)) = response.chunk().await {
+                // If the disk loop drops or error terminates, break network pipeline cleanly
+                if tx.send(chunk).await.is_err() {
+                    break;
+                }
+            }
+            drop(tx);
+        });
+
+        // 4. SEQUENTIAL DISK CONSUMER & TELEMETRY STREAM
         let file = File::create(&destination_path)
             .await
             .map_err(|e| StoreApiError::IoFailure {
-                message: e.to_string(),
+                message: format!("Failed to create local volume asset: {}", e),
             })?;
-        let mut buffered_writer = BufWriter::with_capacity(32 * 1024, file);
+        
+        // Bump writer buffer capacity to 256KB to reduce physical SSD flush iterations
+        let mut buffered_writer = BufWriter::with_capacity(256 * 1024, file);
 
-        let mut byte_stream = response.bytes_stream();
         let mut bytes_written: u64 = 0;
         let mut last_reported_bytes: u64 = 0;
         let mut last_update_time = Instant::now();
-        let throttle_interval = Duration::from_millis(250);
+        let throttle_interval = Duration::from_millis(250); // 250ms update cadence keeps UI stable
 
-        while let Some(chunk_result) = byte_stream.next().await {
-            let chunk = chunk_result.map_err(|e| StoreApiError::NetworkFailure {
-                message: format!("Download chunk stream split failure: {}", e),
-            })?;
+        println!("Streaming high-volume asset profile: {}", module.display_title);
 
+        while let Some(chunk) = rx.recv().await {
             buffered_writer
                 .write_all(&chunk)
                 .await
                 .map_err(|e| StoreApiError::IoFailure {
-                    message: e.to_string(),
+                    message: format!("Disk storage partition write failure: {}", e),
                 })?;
 
             bytes_written += chunk.len() as u64;
@@ -295,19 +297,38 @@ impl StoreApiClient {
             let time_since_report = last_update_time.elapsed();
 
             if bytes_since_report >= chunk_threshold || time_since_report >= throttle_interval {
-                progress_listener.on_progress(module.unique_id.clone(), bytes_written, total_size);
+                // let percentage = match total_size {
+                //     Some(total) if total > 0 => (bytes_written as f64 / total as f64) * 100.0,
+                //     _ => 0.0,
+                // };
+
+                // Print directly to terminal instantly
+                // println!(
+                //     "[{}] Downloading: {:.2}% ({}/{:?} bytes)",
+                //     module.unique_id, percentage, bytes_written, total_size
+                // );
+
+                // Pass metrics out to UniFFI/Swift pool without stalling the disk processing context
+                let listener_clone = Arc::clone(&progress_listener);
+                let id_clone = module.unique_id.clone();
+                tokio::spawn(async move {
+                    listener_clone.on_progress(id_clone, bytes_written, total_size);
+                });
+
                 last_reported_bytes = bytes_written;
                 last_update_time = Instant::now();
             }
         }
 
+        // 5. Hard flush the disk structure
         buffered_writer
             .flush()
             .await
             .map_err(|e| StoreApiError::IoFailure {
-                message: format!("Failed to flush target cache disk buffers: {}", e),
+                message: format!("Failed to finalize cache disk allocations: {}", e),
             })?;
 
+        println!("[{}] Large asset download completed successfully!", module.unique_id);
         progress_listener.on_progress(module.unique_id.clone(), bytes_written, total_size);
 
         Ok(destination_path.to_string_lossy().into_owned())
