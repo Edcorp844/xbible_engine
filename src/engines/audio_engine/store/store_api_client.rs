@@ -211,7 +211,7 @@ impl StoreApiClient {
         Ok(parsed.audio_modules)
     }
 
-    pub async fn download_and_install_module(
+   pub async fn download_and_install_module(
         &self,
         module: RemoteAudioModuleInfo,
         target_dir_path: String,
@@ -221,44 +221,76 @@ impl StoreApiClient {
         let file_name = format!("{}_v{}.xba", module.unique_id, module.version);
         let destination_path = target_dir.join(file_name);
 
+        // 1. Check if a partial or complete file already exists on disk
+        let mut initial_bytes: u64 = 0;
         if destination_path.exists() {
             if let Ok(meta) = std::fs::metadata(&destination_path) {
-                progress_listener.on_progress(
-                    module.unique_id.clone(),
-                    meta.len(),
-                    Some(meta.len()),
-                );
+                initial_bytes = meta.len();
             }
-            return Ok(destination_path.to_string_lossy().into_owned());
         }
 
-        // 1. Establish the connection handle forcing un-adulterated raw streams
-        let mut response = self
-            .client
-            .get(&module.source_url)
-            .header(reqwest::header::ACCEPT_ENCODING, "identity")
-            .send()
+        // 2. Head request or initial setup to determine total file size from server
+        // We configure the primary request builder
+        let mut req_builder = self.client.get(&module.source_url)
+            .header(reqwest::header::ACCEPT_ENCODING, "identity");
+
+        // 3. If we have partial bytes, inject the Range Header
+        if initial_bytes > 0 {
+            req_builder = req_builder.header(
+                reqwest::header::RANGE,
+                format!("bytes={}-", initial_bytes),
+            );
+            println!("[{}] Found partial download. Attempting to resume from {} bytes...", module.unique_id, initial_bytes);
+        }
+
+        let response = req_builder.send().await.map_err(|e| StoreApiError::NetworkFailure {
+            message: format!("Handshake initialization failure: {}", e),
+        })?;
+
+        let status = response.status();
+        
+        // 4. Determine total size and verify if server accepted the resume request
+        let (mut bytes_written, total_size) = if status == reqwest::StatusCode::PARTIAL_CONTENT {
+            // Server accepted range request. The content_length() here is only the *remaining* bytes.
+            let remaining = response.content_length().unwrap_or(0);
+            let total = initial_bytes + remaining;
+            (initial_bytes, Some(total))
+        } else {
+            // Server doesn't support range requests or file is being fetched from scratch (Status 200)
+            (0, response.content_length())
+        };
+
+        // If the local file matches or exceeds the server size, it's already done
+        if let Some(total) = total_size {
+            if initial_bytes >= total && total > 0 {
+                println!("[{}] Module already fully downloaded offline.", module.unique_id);
+                progress_listener.on_progress(module.unique_id.clone(), total, Some(total));
+                return Ok(destination_path.to_string_lossy().into_owned());
+            }
+        }
+
+        // 5. Open file in APPEND mode if resuming, otherwise CREATE/Truncate it
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .append(bytes_written > 0) 
+            .open(&destination_path)
             .await
-            .map_err(|e| StoreApiError::NetworkFailure {
-                message: format!("GB Handshake initialization failure: {}", e),
+            .map_err(|e| StoreApiError::IoFailure {
+                message: format!("Failed to open local storage destination: {}", e),
             })?;
 
-        let total_size = response.content_length();
-        
-        // Scale our progress reporting threshold dynamically for large multi-gigabyte assets
         let chunk_threshold = match total_size {
-            Some(total) if total > 200 => total / 200, // 0.5% granular steps
+            Some(total) if total > 200 => total / 200, // 0.5% steps
             _ => 64 * 1024,
         };
 
-        // 2. FIX: Create a tightly bounded channel (16 slots)
-        // This caps maximum memory overhead to a few megabytes, completely preventing OOM crashes.
+        // 6. Set up backpressure channel and separate network stream
         let (tx, mut rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(16);
+        let mut stream_response = response;
 
-        // 3. SEPARATED ASYNC NETWORK PUMP
         tokio::spawn(async move {
-            while let Ok(Some(chunk)) = response.chunk().await {
-                // If the disk loop drops or error terminates, break network pipeline cleanly
+            while let Ok(Some(chunk)) = stream_response.chunk().await {
                 if tx.send(chunk).await.is_err() {
                     break;
                 }
@@ -266,22 +298,14 @@ impl StoreApiClient {
             drop(tx);
         });
 
-        // 4. SEQUENTIAL DISK CONSUMER & TELEMETRY STREAM
-        let file = File::create(&destination_path)
-            .await
-            .map_err(|e| StoreApiError::IoFailure {
-                message: format!("Failed to create local volume asset: {}", e),
-            })?;
-        
-        // Bump writer buffer capacity to 256KB to reduce physical SSD flush iterations
+        // 7. Flush loop to write chunks sequentially
         let mut buffered_writer = BufWriter::with_capacity(256 * 1024, file);
-
-        let mut bytes_written: u64 = 0;
-        let mut last_reported_bytes: u64 = 0;
+        let mut last_reported_bytes = bytes_written;
         let mut last_update_time = Instant::now();
-        let throttle_interval = Duration::from_millis(250); // 250ms update cadence keeps UI stable
+        let throttle_interval = Duration::from_millis(250);
 
-        println!("Streaming high-volume asset profile: {}", module.display_title);
+        // Instantly notify UI of the starting point (e.g., jumping straight to 50% if half-downloaded)
+        progress_listener.on_progress(module.unique_id.clone(), bytes_written, total_size);
 
         while let Some(chunk) = rx.recv().await {
             buffered_writer
@@ -297,18 +321,16 @@ impl StoreApiClient {
             let time_since_report = last_update_time.elapsed();
 
             if bytes_since_report >= chunk_threshold || time_since_report >= throttle_interval {
-                // let percentage = match total_size {
-                //     Some(total) if total > 0 => (bytes_written as f64 / total as f64) * 100.0,
-                //     _ => 0.0,
-                // };
+                let percentage = match total_size {
+                    Some(total) if total > 0 => (bytes_written as f64 / total as f64) * 100.0,
+                    _ => 0.0,
+                };
 
-                // Print directly to terminal instantly
-                // println!(
-                //     "[{}] Downloading: {:.2}% ({}/{:?} bytes)",
-                //     module.unique_id, percentage, bytes_written, total_size
-                // );
+                println!(
+                    "[{}] Downloading: {:.2}% ({}/{:?} bytes)",
+                    module.unique_id, percentage, bytes_written, total_size
+                );
 
-                // Pass metrics out to UniFFI/Swift pool without stalling the disk processing context
                 let listener_clone = Arc::clone(&progress_listener);
                 let id_clone = module.unique_id.clone();
                 tokio::spawn(async move {
@@ -320,7 +342,6 @@ impl StoreApiClient {
             }
         }
 
-        // 5. Hard flush the disk structure
         buffered_writer
             .flush()
             .await
@@ -328,7 +349,7 @@ impl StoreApiClient {
                 message: format!("Failed to finalize cache disk allocations: {}", e),
             })?;
 
-        println!("[{}] Large asset download completed successfully!", module.unique_id);
+        println!("[{}] Download completed successfully!", module.unique_id);
         progress_listener.on_progress(module.unique_id.clone(), bytes_written, total_size);
 
         Ok(destination_path.to_string_lossy().into_owned())
