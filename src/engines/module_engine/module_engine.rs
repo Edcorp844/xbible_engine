@@ -6,15 +6,18 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::ffi::*;
-use crate::engines::module_engine::sword_module::module_color::ModuleColor;
+use crate::engines::module_engine::sword_module::module::SwordModule;
 use crate::engines::module_engine::sword_module::module_book::ModuleBook;
 use crate::engines::module_engine::sword_module::module_chapter::ModuleChapter;
-use crate::engines::module_engine::sword_module::module::SwordModule;
+use crate::engines::module_engine::sword_module::module_color::ModuleColor;
+use crate::ffi::*;
 
+pub static PROGRESS_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static PROGRESS_COMPLETED: AtomicU64 = AtomicU64::new(0);
 
-static PROGRESS_TOTAL: AtomicU64 = AtomicU64::new(0);
-static PROGRESS_COMPLETED: AtomicU64 = AtomicU64::new(0);
+pub trait StoreDownloadProgressListener: Send + Sync {
+    fn on_progress(&self, unique_id: String, current_bytes: u64, total_bytes: Option<u64>);
+}
 
 #[derive(Debug)]
 pub struct SwordInner {
@@ -61,26 +64,27 @@ impl ModuleEngine {
         }
     }
 
-    unsafe extern "C" fn status_reporter(
+    pub unsafe extern "C" fn status_reporter(
         msg: *const ::std::os::raw::c_char,
         total: ::std::os::raw::c_ulong,
         completed: ::std::os::raw::c_ulong,
     ) {
-        unsafe {
-            PROGRESS_TOTAL.store(total as u64, Ordering::SeqCst);
-            PROGRESS_COMPLETED.store(completed as u64, Ordering::SeqCst);
+        // Use AcqRel ordering for read-modify-write tracking across threads
+        PROGRESS_TOTAL.store(total as u64, Ordering::SeqCst);
+        PROGRESS_COMPLETED.store(completed as u64, Ordering::SeqCst);
 
-            if !msg.is_null() {
-                let message = CStr::from_ptr(msg).to_string_lossy();
-                println!(
-                    "[ModuleEngine] Progress: {}/{} - {}",
-                    completed, total, message
-                );
-            }
+        if !msg.is_null() {
+            // Defensive check: wrap in a catch_unwind or direct pointer check
+            // to ensure string parsing doesn't crash during immediate teardown
+            let message = unsafe { CStr::from_ptr(msg).to_string_lossy() };
+            println!(
+                "[ModuleEngine] Progress: {}/{} - {}",
+                completed, total, message
+            );
         }
     }
 
-    unsafe fn rebuild_mgr(&self, inner: &mut SwordInner) {
+    pub unsafe fn rebuild_mgr(&self, inner: &mut SwordInner) {
         println!("[ModuleEngine] Rebuilding SWMgr...");
         unsafe { org_crosswire_sword_SWMgr_delete(inner.mgr) };
 
@@ -103,112 +107,6 @@ impl ModuleEngine {
         println!("[ModuleEngine] SWMgr rebuilt successfully");
     }
 
-    // ------------------- REMOTE SOURCES -------------------
-
-    pub fn get_remote_source_list(&self) -> Vec<String> {
-        let inner = self.inner.lock().unwrap();
-        let mut sources = Vec::new();
-        unsafe {
-            org_crosswire_sword_InstallMgr_setUserDisclaimerConfirmed(inner.install_mgr);
-            org_crosswire_sword_InstallMgr_syncConfig(inner.install_mgr);
-
-            let ptr = org_crosswire_sword_InstallMgr_getRemoteSources(inner.install_mgr);
-            if !ptr.is_null() {
-                let mut i = 0;
-                while !(*ptr.offset(i)).is_null() {
-                    sources.push(self.ptr_to_str(*ptr.offset(i)));
-                    i += 1;
-                }
-            }
-        }
-
-        // If no sources were found (network issues, permissions, etc.), provide defaults
-        if sources.is_empty() {
-            println!("[ModuleEngine] No remote sources found, using default sources");
-            sources = vec![
-                "CrossWire".to_string(),
-                "IBT".to_string(),
-                "ibiblio".to_string(),
-            ];
-        }
-
-        println!("[ModuleEngine] Remote sources: {:?}", sources);
-        sources
-    }
-
-    pub fn fetch_remote_modules(&self, source_name: &str) -> Vec<SwordModule> {
-        let mut modules = Vec::new();
-        let c_source = CString::new(source_name).unwrap();
-        
-        let path_str = self.sword_path.to_string_lossy().replace("\\", "/");
-        let c_path = CString::new(path_str).unwrap();
-
-        unsafe {
-            // Create local, temporary handles for this fetch task.
-            // This allows us to perform multiple fetches in parallel without locking the global engine.
-            let local_install_mgr = org_crosswire_sword_InstallMgr_new(c_path.as_ptr(), None);
-            let local_mgr = org_crosswire_sword_SWMgr_newWithPath(c_path.as_ptr());
-
-            // 1. Refresh (Downloads to temp)
-            org_crosswire_sword_InstallMgr_setUserDisclaimerConfirmed(local_install_mgr);
-            org_crosswire_sword_InstallMgr_refreshRemoteSource(
-                local_install_mgr,
-                c_source.as_ptr(),
-            );
-
-            // 2. Sync (Moves from temp to InstallMgr/RemoteSources)
-            org_crosswire_sword_InstallMgr_syncConfig(local_install_mgr);
-            org_crosswire_sword_InstallMgr_syncConfig(local_install_mgr);
-
-            // 3. Query the remote list
-            let info_ptr = org_crosswire_sword_InstallMgr_getRemoteModInfoList(
-                local_install_mgr,
-                local_mgr,
-                c_source.as_ptr(),
-            );
-
-            if !info_ptr.is_null() {
-                let mut i = 0;
-                loop {
-                    let entry = info_ptr.offset(i);
-                    if entry.is_null() || (*entry).name.is_null() {
-                        break;
-                    }
-                    let mut features_vec = Vec::new();
-                    let feature_ptr_ptr = (*entry).features;
-
-                    if !feature_ptr_ptr.is_null() {
-                        let mut j = 0;
-                        while !(*feature_ptr_ptr.offset(j)).is_null() {
-                            let feature_c_str = CStr::from_ptr(*feature_ptr_ptr.offset(j));
-                            features_vec.push(feature_c_str.to_string_lossy().into_owned());
-                            j += 1;
-                        }
-                    }
-
-                    let color_hash = format!("{}{}", self.ptr_to_str((*entry).name), self.ptr_to_str((*entry).description));
-                    modules.push(SwordModule {
-                        name: self.ptr_to_str((*entry).name),
-                        description: self.ptr_to_str((*entry).description),
-                        category: self.ptr_to_str((*entry).category),
-                        language: self.from_code(self.ptr_to_str((*entry).language).as_str()),
-                        source: source_name.to_string(),
-                        version: self.ptr_to_str((*entry).version),
-                        delta: self.ptr_to_str((*entry).delta),
-                        cipher_key: self.ptr_to_str((*entry).cipherKey),
-                        features: features_vec,
-                        signature_color: ModuleColor::generate(&color_hash),
-                    });
-                    i += 1;
-                }
-            }
-
-            // Cleanup local handles
-            org_crosswire_sword_SWMgr_delete(local_mgr);
-            org_crosswire_sword_InstallMgr_delete(local_install_mgr);
-        }
-        modules
-    }
     // ------------------- LOCAL MODULES -------------------
 
     pub fn get_modules(&self) -> Vec<SwordModule> {
@@ -235,8 +133,12 @@ impl ModuleEngine {
                     }
                 }
 
-                 let color_hash = format!("{}{}", self.ptr_to_str((*ptr).name), self.ptr_to_str((*ptr).description));
-                  
+                let color_hash = format!(
+                    "{}{}",
+                    self.ptr_to_str((*ptr).name),
+                    self.ptr_to_str((*ptr).description)
+                );
+
                 modules.push(SwordModule {
                     name: self.ptr_to_str(info.name),
                     description: self.ptr_to_str(info.description),
@@ -313,8 +215,7 @@ impl ModuleEngine {
                 let desc = m.description.to_lowercase();
 
                 // Glossaries typically have "gloss" in category or are simple dictionaries
-                cat.contains("gloss") ||
-                (cat.contains("dict") && !desc.contains("lexicon"))
+                cat.contains("gloss") || (cat.contains("dict") && !desc.contains("lexicon"))
             })
             .collect()
     }
@@ -329,10 +230,10 @@ impl ModuleEngine {
                 let desc = m.description.to_lowercase();
 
                 // Lexicons have "lex" in category or are Strong's dictionaries
-                cat.contains("lex") ||
-                name.contains("strong") ||
-                desc.contains("lexicon") ||
-                desc.contains("strong")
+                cat.contains("lex")
+                    || name.contains("strong")
+                    || desc.contains("lexicon")
+                    || desc.contains("strong")
             })
             .collect()
     }
@@ -345,9 +246,7 @@ impl ModuleEngine {
                 let cat = m.category.to_lowercase();
                 let desc = m.description.to_lowercase();
 
-                cat.contains("daily") ||
-                desc.contains("devotional") ||
-                desc.contains("daily")
+                cat.contains("daily") || desc.contains("devotional") || desc.contains("daily")
             })
             .collect()
     }
@@ -357,64 +256,6 @@ impl ModuleEngine {
     }
     pub fn get_map_modules(&self) -> Vec<SwordModule> {
         self.get_modules_by_category(vec!["Images", "Maps"])
-    }
-
-    // ------------------- INSTALL MODULE -------------------
-
-    pub fn install_remote_module(&self, source: &str, module_name: &str) -> i32 {
-        let c_source = CString::new(source).unwrap();
-        let c_mod = CString::new(module_name).unwrap();
-
-        PROGRESS_TOTAL.store(0, Ordering::SeqCst);
-        PROGRESS_COMPLETED.store(0, Ordering::SeqCst);
-
-        let path_str = self.sword_path.to_string_lossy().replace("\\", "/");
-        let c_path = CString::new(path_str).unwrap();
-
-        unsafe {
-            // Create local, temporary handles for the installation.
-            // This avoids blocking the main engine's Mutex during the long download/extract process,
-            // allowing the user to keep reading their Bible while a module installs.
-            let local_install_mgr = org_crosswire_sword_InstallMgr_new(c_path.as_ptr(), Some(Self::status_reporter));
-            let local_mgr = org_crosswire_sword_SWMgr_newWithPath(c_path.as_ptr());
-
-            println!(
-                "[ModuleEngine] Installing '{}' from '{}' (Background)",
-                module_name, source
-            );
-
-            // 1. Refresh the source before installation
-            org_crosswire_sword_InstallMgr_setUserDisclaimerConfirmed(local_install_mgr);
-            org_crosswire_sword_InstallMgr_refreshRemoteSource(
-                local_install_mgr,
-                c_source.as_ptr(),
-            );
-
-            // 2. Sync the refreshed data
-            org_crosswire_sword_InstallMgr_syncConfig(local_install_mgr);
-
-            // 3. Now attempt installation using local handles
-            let res = org_crosswire_sword_InstallMgr_remoteInstallModule(
-                local_install_mgr,
-                local_mgr,
-                c_source.as_ptr(),
-                c_mod.as_ptr(),
-            );
-            println!("[ModuleEngine] Install result: {}", res);
-
-            // 4. Cleanup local handles
-            org_crosswire_sword_SWMgr_delete(local_mgr);
-            org_crosswire_sword_InstallMgr_delete(local_install_mgr);
-
-            // 5. If installation was successful, lock the main engine ONLY to rebuild it
-            if res == 0 {
-                println!("[ModuleEngine] Installation successful, refreshing main engine awareness");
-                let mut inner = self.inner.lock().unwrap();
-                self.rebuild_mgr(&mut inner);
-            }
-
-            res
-        }
     }
 
     pub fn uninstall_module(&self, module_name: &str) -> i32 {
@@ -431,25 +272,15 @@ impl ModuleEngine {
             println!("[ModuleEngine] Uninstall result: {}", res);
 
             if res == 0 {
-                println!("[ModuleEngine] Uninstallation successful, refreshing main engine awareness");
+                println!(
+                    "[ModuleEngine] Uninstallation successful, refreshing main engine awareness"
+                );
                 self.rebuild_mgr(&mut inner);
             }
 
             res
         }
     }
-
-    pub fn get_download_progress(&self) -> f64 {
-        let total = PROGRESS_TOTAL.load(Ordering::SeqCst);
-        let completed = PROGRESS_COMPLETED.load(Ordering::SeqCst);
-        if total == 0 {
-            0.0
-        } else {
-            (completed as f64 / total as f64).clamp(0.0, 1.0)
-        }
-    }
-
-    // ------------------- BIBLE STRUCTURE -------------------
 
     pub fn get_bible_structure(&self, module_name: &str) -> Vec<ModuleBook> {
         let mut books = Vec::new();
@@ -541,7 +372,6 @@ impl ModuleEngine {
         books
     }
 
-
     // ------------------- HELPERS -------------------
 
     fn ptr_to_str(&self, ptr: *const i8) -> String {
@@ -566,12 +396,9 @@ impl ModuleEngine {
 
         // 2. CRITICAL: Create the specific folder the InstallMgr uses for Remote Sources
         // If this isn't here, the 'syncConfig' download has nowhere to land.
-        let sources = ["CrossWire", "Bible.org", "IBT", "ebible.org"];
+        let sources = ["Bible.org", "CrossWire", "CrossWire Attic", "CrossWire Beta", "CrossWire Wycliffe", "Deutsche Bibelgesellschaft", "IBT", "Lockman Foundation", "STEP Bible", "Xiphos", "eBible.org"];
         for source in &sources {
-            let remote_sources = path
-                .join("InstallMgr")
-                .join("RemoteSources")
-                .join(source);
+            let remote_sources = path.join("InstallMgr").join("RemoteSources").join(source);
             let _ = fs::create_dir_all(&remote_sources);
         }
 

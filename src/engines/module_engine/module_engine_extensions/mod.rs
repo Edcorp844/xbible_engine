@@ -4,3 +4,4 @@ pub mod module_engine_language_ext;
 pub mod module_engine_lexicon_ext;
 pub mod module_engine_module_content_ext;
 pub mod module_engine_util_ext;
+pub mod module_engine_remote_modules_ext;

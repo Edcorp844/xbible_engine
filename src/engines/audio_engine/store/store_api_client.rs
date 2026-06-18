@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 
 #[derive(Debug, Serialize, Deserialize, Clone, uniffi::Record)]
