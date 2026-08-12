@@ -23,10 +23,10 @@ TARGETS=(
     "macOS (Silicon)"      "aarch64-apple-darwin"    "a"   "macOS"
     "iOS (Sim)"            "aarch64-apple-ios-sim"   "a"   "iOS"
     "iOS (Device)"         "aarch64-apple-ios"       "a"   "iOS"
-    "Android (ARM64)"      "aarch64-linux-android"   "so"  "Android"
-    "Android (x86_64/Sim)" "x86_64-linux-android"    "so"  "Android"
-    "Linux (x86_64)"       "x86_64-unknown-linux-gnu" "so" "Linux"
-    "Windows (x86_64)"     "x86_64-pc-windows-msvc"  "dll" "Windows"
+    "Android (ARM64)"      "aarch64-linux-android"   "so"  "android"
+    "Android (x86_64/Sim)" "x86_64-linux-android"    "so"  "android"
+    "Linux (x86_64)"       "x86_64-unknown-linux-gnu" "so" "linux"
+    "Windows (x86_64)"     "x86_64-pc-windows-msvc"  "dll" "lindows"
 )
 
 LANGS=("swift" "kotlin" "csharp" "java" "c" "cpp" "python" "ruby")
