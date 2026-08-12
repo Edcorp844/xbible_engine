@@ -1,0 +1,147 @@
+[0;35m[1m=======================================[0m
+[0;35m[1m    xbible_engine: Universal Build     [0m
+[0;35m[1m=======================================[0m
+[1;33m1. Select Target Platforms (Choosing 1, 2, 3, or 4 builds ALL Apple platforms):[0m
+[0;36m1)[0m macOS (Intel)
+[0;36m2)[0m macOS (Silicon)
+[0;36m3)[0m iOS (Sim)
+[0;36m4)[0m iOS (Device)
+[0;36m5)[0m Android (ARM64)
+[0;36m6)[0m Android (x86_64/Sim)
+[0;36m7)[0m Linux (x86_64)
+[0;36m8)[0m Windows (x86_64)
+[1mSelection: [0m
+[1;33m2. Select Binding Languages:[0m
+[0;36m1)[0m swift
+[0;36m2)[0m kotlin
+[0;36m3)[0m csharp
+[0;36m4)[0m java
+[0;36m5)[0m c
+[0;36m6)[0m cpp
+[0;36m7)[0m python
+[0;36m8)[0m ruby
+[1mSelection: [0m
+[0;34m[1m🔨 Building Android (x86_64/Sim) (x86_64-linux-android)...[0m
+   Compiling xbible_engine v0.1.0 (/Users/zoebrooklyn/Documents/Dev/xbible_engine)
+error: failed to run custom build command for `xbible_engine v0.1.0 (/Users/zoebrooklyn/Documents/Dev/xbible_engine)`
+
+Caused by:
+  process didn't exit successfully: `/Users/zoebrooklyn/Documents/Dev/xbible_engine/target/release/build/xbible_engine-66fbe42dcc84a399/build-script-build` (exit status: 101)
+  --- stdout
+  CMAKE_GENERATOR_x86_64-linux-android = None
+  CMAKE_GENERATOR_x86_64_linux_android = None
+  TARGET_CMAKE_GENERATOR = None
+  CMAKE_GENERATOR = None
+  CMAKE_PREFIX_PATH_x86_64-linux-android = None
+  CMAKE_PREFIX_PATH_x86_64_linux_android = None
+  TARGET_CMAKE_PREFIX_PATH = None
+  CMAKE_PREFIX_PATH = None
+  CMAKE_x86_64-linux-android = None
+  CMAKE_x86_64_linux_android = None
+  TARGET_CMAKE = None
+  CMAKE = None
+  -- Configuring your system to build libsword.
+  -- SWORD Version 1009000000
+  -- 
+  -- SEARCHING FOR SYTEM PACKAGES
+  -- 
+  -- CONFIGURING SOURCE LIST
+  -- ZLib: system /Users/zoebrooklyn/Library/Android/sdk/ndk/30.0.15729638/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/x86_64-linux-android/21/libz.so
+  -- bzip2: no
+  -- xz: no
+  -- cURL: no
+  -- CLucene: no
+  -- PkgConfig: yes
+  -- ICU: no
+  -- Regex.h: internal
+  -- Building Shared library.
+  -- Building Static library.
+  -- Setting SOVERSION to 1.9.0
+  -- Setting link libraries to /Users/zoebrooklyn/Library/Android/sdk/ndk/30.0.15729638/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/x86_64-linux-android/21/libz.so
+  -- 
+  -- CONFIGURING INSTALLATION DESTINATIONS
+  -- Destination: /Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out
+  -- 0
+  -- Configuring done (0.3s)
+  -- Generating done (0.1s)
+  -- Build files have been written to: /Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/build
+  [  0%] Building C object CMakeFiles/sword.dir/src/modules/common/ioapi.c.o
+  [  0%] Building C object CMakeFiles/sword.dir/src/utilfuns/ftplib.c.o
+  [  1%] Building C object CMakeFiles/sword.dir/src/utilfuns/regex.c.o
+  [  2%] Building C object CMakeFiles/sword_static.dir/src/modules/common/ioapi.c.o
+
+  --- stderr
+  running: cd "/Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/build" && CMAKE_PREFIX_PATH="" LC_ALL="C" "cmake" "/Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated" "-B" "/Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/build" "-DSWORD_BUILD_SHARED=OFF" "-DBUILD_SHARED_LIBS=OFF" "-DSWORD_BUILD_EXAMPLES=OFF" "-DSWORD_BUILD_TESTS=OFF" "-DSWORD_BUILD_UTILS=OFF" "-DSWORD_CURL=ON" "-DCMAKE_TOOLCHAIN_FILE=/Users/zoebrooklyn/Library/Android/sdk/ndk/30.0.15729638/build/cmake/android.toolchain.cmake" "-DANDROID_ABI=x86_64" "-DANDROID_PLATFORM=android-21" "-DCMAKE_INSTALL_PREFIX=/Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out" "-DCMAKE_C_FLAGS= -w" "-DCMAKE_CXX_FLAGS= -w" "-DCMAKE_ASM_FLAGS= -w" "-DCMAKE_BUILD_TYPE=Release"
+  running: cd "/Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/build" && LC_ALL="C" "cmake" "--build" "/Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/build" "--target" "install" "--config" "Release" "--parallel" "8"
+  /Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.c/Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.c:129:16: error: call to undeclared function 'fopen64'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+  :  129 |   129:16:  error:  call to undeclared function 'fopen64'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration] 
+     file = FOPEN_FUNC((co  n129s | t   c h a r * ) ffiilleen a=m eF,O PmEoNd_eF_UfNoCp(e(nc)o;n
+  s      t|                 ^c
+  har*)file/Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.c:23:36: nnote: expanded from macro 'FOPEN_FUNC'a
+  me, mo   23 | #ddeef_ifnoepen); 
+  F      O| P               ^E
+  N_FUN/Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.cC:(23:36: note: expanded from macro 'FOPEN_FUNC'
+  file   n23 | #define aFmOeP, mode)E Nf_oFpen6UNC(fi4(filleennaammee,,  mmooddee)) 
+  f      open|                                    ^
+  64(filename, mode)
+        |                                    ^
+  /Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.c/Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.c::129129::1616: note: did you mean 'fopen'?
+  :/Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.c: note: did you mean 'fopen'?
+  23:36: note: /Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.c:23:expanded from macro 'FOPEN_FUNC'36
+  : note: expanded from macro 'FOPEN_FUNC'
+     23 | #d   e23f | i#ndee fFiOnPeE NF_OFPUNC(EfNi_lFenamUeN,C (modefilenam) fopen64(filename,e,  momode)
+  de) fo      pen64| (                                   ^f
+  ilename, mode)
+        |                                    ^
+  /Users/zoebrooklyn/Library/Android/sdk/ndk/30.0.15729638/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/stdio.h/Users/zoebrooklyn/Library/Android/sdk/ndk/30.0.15729638/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/stdio.h::334334::2929::  note: note: 'fopen' declared here'fopen' declared here
+
+      334334 |  | ____nnooddiissccaarrd FILE* _d FILNullable fopeEn*( c_oNnusltl acbhlaer *f o_pNeonn(ncuolnls t_ _cphaatrh*,  _cNoonnsntu lclh a_r_*p a_tNho,n ncuolnls t_ _cmhoadre*);
+        |                             ^
+   _Nonnull __mode);
+        |                             ^
+  /Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.c/Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.c::129129::1414::  error: error: incompatible integer to pointer conversion assigning to 'FILE *' (aka 'struct __sFILE *') from 'int' [-Wint-conversion]incompatible integer to pointer conversion assigning to 'FILE *' (aka 'struct __sFILE *') from 'int' [-Wint-conversion]
+
+      129129 |  |                 ffiillee  ==  FFOOPPEENN__FFUUNNCC((((ccoonnst char*)filename, mode_fopen);
+        |              ^ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  st char*)filename, mode_fopen);
+        |              ^ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  /Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.c:163:21: error: call to undeclared function 'ftello64'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+    163 |  /Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.c:163:21: error: call to undeclared function 'ftello64'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration] 
+    ret = (  Z163P | O    rSe6t4 _=T )(ZPOFTELLO_FSU6N4C_(T()FTEFILE *)stream);
+        |                     ^LLO_FUN
+  C((/Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.c:24:F29I:L Enote:  expanded from macro 'FTELLO_FUNC'*
+  )stream)   24 | #;
+        |                     ^
+  de/Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.cf:i24:29:ne FTELLO_FUNC(stream) ftello64(stream)
+        |                             ^ note: expanded from macro 'FTELLO_FUNC'
+
+     24 | #define FTELLO_FUNC(stream) ftello64(stream)
+        |                             ^
+  /Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.c:211:8: error: call to undeclared function 'fseeko64'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+    211 |     if(FSEEKO_FUNC((FILE *)stream, (long)offset, fseek_origin) != 0)
+        |        ^
+  /Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.c:25:45: note: expanded from macro 'FSEEKO_FUNC'
+     25 | #define FSEEKO_FUNC(stre/Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.c:211:8: aerror: call to undeclared function 'fseeko64'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+  m, o  211 |     if(FSEEKO_FUNC((FILEf f*s)estt, orirgeian) fm, (long)offset, fseekseeko64(s_torigriena) !=m, o f0f)s
+        |        ^
+  et,/Users/zoebrooklyn/Documents/Dev/xbible_engine/target/x86_64-linux-android/release/build/xbible_engine-19ddb7027afd359e/out/sword_source_isolated/src/modules/common/ioapi.c :o25r:i45g:i nnote: )expanded from macro 'FSEEKO_FUNC'
+        |                                             ^
+
+     25 | #define FSEEKO_FUNC(stream, offset, origin) fseeko64(stream, offset, origin)
+        |                                             ^
+  4 errors generated.
+  4 errors generated.
+  make[2]: make[2]: *** [CMakeFiles/sword.dir/src/modules/common/ioapi.c.o] Error 1
+  *** [CMakeFiles/sword_static.dir/src/modules/common/ioapi.c.o] Error 1
+  make[2]: *** Waiting for unfinished jobs....
+  make[1]: *** [CMakeFiles/sword_static.dir/all] Error 2
+  make[1]: *** Waiting for unfinished jobs....
+  make[1]: *** [CMakeFiles/sword.dir/all] Error 2
+  make: *** [all] Error 2
+
+  thread 'main' (457220) panicked at /Users/zoebrooklyn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cmake-0.1.58/src/lib.rs:1132:5:
+
+  command did not execute successfully, got: exit status: 2
+
+  build script failed, must exit now
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

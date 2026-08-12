@@ -120,7 +120,7 @@ impl StoreApiService {
                 cache.iter().find(|m| m.unique_id == module_id).cloned()
             }
             .ok_or_else(|| StoreApiError::SerializationFailure {
-                message: format!("Module {} not found in cache.", module_id),
+                error_message: format!("Module {} not found in cache.", module_id),
             })?;
 
             let target_dir = self.get_audio_modules_path();

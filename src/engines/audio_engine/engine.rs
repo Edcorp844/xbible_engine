@@ -22,23 +22,27 @@ const SECRET_KEY: &[u8; 32] = &[
 pub enum AudioEngineError {
     #[error("Container package item not found: {path}")]
     ModuleNotFound { path: String },
-    #[error("File system I/O error occurred: {message}")]
-    IoFailure { message: String },
-    #[error("Failed to parse structural JSON content format: {message}")]
-    SerializationFailure { message: String },
-    #[error("Decryption safety failure: {message}")]
-    DecryptionFailure { message: String },
+    #[error("File system I/O error occurred: {error_message}")]
+    IoFailure { error_message: String },
+    #[error("Failed to parse structural JSON content format: {error_message}")]
+    SerializationFailure { error_message: String },
+    #[error("Decryption safety failure: {error_message}")]
+    DecryptionFailure { error_message: String },
 }
 
 impl From<std::io::Error> for AudioEngineError {
     fn from(err: std::io::Error) -> Self {
-        AudioEngineError::IoFailure { message: err.to_string() }
+        AudioEngineError::IoFailure {
+            error_message: err.to_string(),
+        }
     }
 }
 
 impl From<serde_json::Error> for AudioEngineError {
     fn from(err: serde_json::Error) -> Self {
-        AudioEngineError::SerializationFailure { message: err.to_string() }
+        AudioEngineError::SerializationFailure {
+            error_message: err.to_string(),
+        }
     }
 }
 
@@ -55,7 +59,7 @@ pub enum RepeatMode {
 
 #[derive(Debug, Clone, uniffi::Record, serde::Deserialize)]
 pub struct AudioNode {
-    pub r#type: String, 
+    pub r#type: String,
     pub id: String,
     pub title: String,
     pub start_ms: Option<i64>,
@@ -145,7 +149,11 @@ impl AudioEngine {
         if let Ok(entries) = fs::read_dir(path) {
             for entry in entries.flatten() {
                 let file_path = entry.path();
-                if file_path.is_file() && file_path.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("xba")) {
+                if file_path.is_file()
+                    && file_path
+                        .extension()
+                        .map_or(false, |ext| ext.eq_ignore_ascii_case("xba"))
+                {
                     if let Some(name_str) = file_path.file_name().and_then(|n| n.to_str()) {
                         let metadata = self.read_module_metadata_peek(&file_path);
                         let artwork = Artwork::new(file_path.to_string_lossy().into_owned());
@@ -162,14 +170,17 @@ impl AudioEngine {
         modules
     }
 
-    pub fn peek_module_metadata(&self, file_path: String) -> Result<ModuleMetadata, AudioEngineError> {
+    pub fn peek_module_metadata(
+        &self,
+        file_path: String,
+    ) -> Result<ModuleMetadata, AudioEngineError> {
         let path = Path::new(&file_path);
         if !path.exists() {
             return Err(AudioEngineError::ModuleNotFound { path: file_path });
         }
         self.read_module_metadata_peek(path)
             .ok_or_else(|| AudioEngineError::SerializationFailure {
-                message: "Could not read metadata.json".to_string(),
+                error_message: "Could not read metadata.json".to_string(),
             })
     }
 
@@ -181,21 +192,22 @@ impl AudioEngine {
 
         let file = File::open(path)?;
         let mut archive = zip::ZipArchive::new(file).map_err(|e| AudioEngineError::IoFailure {
-            message: format!("Invalid ZIP archive structure: {}", e),
+            error_message: format!("Invalid ZIP archive structure: {}", e),
         })?;
 
         let metadata: Option<ModuleMetadata> = self.read_module_metadata_peek(path);
         let duration = metadata.map(|m| m.duration_ms).unwrap_or(0);
 
-        let root_tree: AudioNode = if let Ok(mut timestamps_file) = archive.by_name("timestamps.json") {
-            let mut json_contents = String::new();
-            timestamps_file.read_to_string(&mut json_contents)?;
-            serde_json::from_str(&json_contents)?
-        } else {
-            return Err(AudioEngineError::IoFailure {
-                message: "Missing required timestamps.json file".to_string(),
-            });
-        };
+        let root_tree: AudioNode =
+            if let Ok(mut timestamps_file) = archive.by_name("timestamps.json") {
+                let mut json_contents = String::new();
+                timestamps_file.read_to_string(&mut json_contents)?;
+                serde_json::from_str(&json_contents)?
+            } else {
+                return Err(AudioEngineError::IoFailure {
+                    error_message: "Missing required timestamps.json file".to_string(),
+                });
+            };
 
         let encrypted_audio_bytes = if let Ok(mut audio_file) = archive.by_name("audio.mp3") {
             let mut bytes = Vec::new();
@@ -203,7 +215,7 @@ impl AudioEngine {
             bytes
         } else {
             return Err(AudioEngineError::IoFailure {
-                message: "Missing required audio.mp3 file".to_string(),
+                error_message: "Missing required audio.mp3 file".to_string(),
             });
         };
 
@@ -213,7 +225,9 @@ impl AudioEngine {
 
         let decrypted_audio_bytes = cipher
             .decrypt(nonce, encrypted_audio_bytes.as_slice())
-            .map_err(|e| AudioEngineError::DecryptionFailure { message: e.to_string() })?;
+            .map_err(|e| AudioEngineError::DecryptionFailure {
+                error_message: e.to_string(),
+            })?;
 
         let mut tree_lock = self.current_tree.lock().unwrap();
         *tree_lock = Some(root_tree);
@@ -244,18 +258,18 @@ impl AudioEngine {
         // Wipe active hardware channels here if required
     }
 
-    /// Skips forward cleanly by 30 seconds (30,000 milliseconds) capped to total duration
-    pub fn skip_forward(&self) {
+    /// Skips forward cleanly by (seconds) seconds ((seconds) * 1,000 milliseconds) capped to total duration
+    pub fn skip_forward(&self, seconds: i64) {
         if let Ok(mut state) = self.playback_state.lock() {
             let limit = state.current_duration_ms;
-            state.current_time_ms = (state.current_time_ms + 30_000).min(limit);
+            state.current_time_ms = (state.current_time_ms + (seconds * 1000)).min(limit);
         }
     }
 
-    /// Backtracks cleanly by 15 seconds (15,000 milliseconds) bounded at 0
-    pub fn skip_backward(&self) {
+    /// Backtracks cleanly by (seconds) seconds (seconds * 1,000 milliseconds) bounded at 0
+    pub fn skip_backward(&self, seconds: i64) {
         if let Ok(mut state) = self.playback_state.lock() {
-            state.current_time_ms = (state.current_time_ms - 15_000).max(0);
+            state.current_time_ms = (state.current_time_ms - (seconds * 1000)).max(0);
         }
     }
 
@@ -301,7 +315,7 @@ impl AudioEngine {
 
         if let Some(matching_verse) = find_active_verse_leaf(root_node, state.current_time_ms) {
             active_text = matching_verse.text.clone().unwrap_or_default();
-            active_index = 1; 
+            active_index = 1;
         }
 
         Some(PlaybackState {
@@ -319,7 +333,9 @@ impl AudioEngine {
     }
 
     pub fn find_active_node_id(&self, time_ms: i64) -> Option<String> {
-        let Some(ref root) = self.get_navigation_tree() else { return None; };
+        let Some(ref root) = self.get_navigation_tree() else {
+            return None;
+        };
         if let Some(active_leaf) = find_active_verse_leaf(root, time_ms) {
             return Some(active_leaf.id.clone());
         }
@@ -341,9 +357,13 @@ impl AudioEngine {
 }
 
 pub fn find_node_by_id<'a>(node: &'a AudioNode, id: &str) -> Option<&'a AudioNode> {
-    if node.id == id { return Some(node); }
+    if node.id == id {
+        return Some(node);
+    }
     for child in &node.children {
-        if let Some(found) = find_node_by_id(child, id) { return Some(found); }
+        if let Some(found) = find_node_by_id(child, id) {
+            return Some(found);
+        }
     }
     None
 }
@@ -351,15 +371,21 @@ pub fn find_node_by_id<'a>(node: &'a AudioNode, id: &str) -> Option<&'a AudioNod
 pub fn find_active_verse_leaf<'a>(node: &'a AudioNode, time_ms: i64) -> Option<&'a AudioNode> {
     if let (Some(start), Some(end)) = (node.start_ms, node.end_ms) {
         if time_ms >= start && time_ms <= end {
-            if node.children.is_empty() { return Some(node); }
+            if node.children.is_empty() {
+                return Some(node);
+            }
             for child in &node.children {
-                if let Some(found) = find_active_verse_leaf(child, time_ms) { return Some(found); }
+                if let Some(found) = find_active_verse_leaf(child, time_ms) {
+                    return Some(found);
+                }
             }
             return Some(node);
         }
     } else {
         for child in &node.children {
-            if let Some(found) = find_active_verse_leaf(child, time_ms) { return Some(found); }
+            if let Some(found) = find_active_verse_leaf(child, time_ms) {
+                return Some(found);
+            }
         }
     }
     None

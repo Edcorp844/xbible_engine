@@ -135,19 +135,19 @@ impl ModuleEngine {
 
                 let color_hash = format!(
                     "{}{}",
-                    self.ptr_to_str((*ptr).name),
-                    self.ptr_to_str((*ptr).description)
+                    self.sword_ptr_to_string((*ptr).name).unwrap_or("".to_string()),
+                    self.sword_ptr_to_string((*ptr).description).unwrap_or("".to_string())
                 );
 
                 modules.push(SwordModule {
-                    name: self.ptr_to_str(info.name),
-                    description: self.ptr_to_str(info.description),
-                    category: self.ptr_to_str(info.category),
-                    language: self.from_code(self.ptr_to_str(info.language).as_str()),
+                    name: self.sword_ptr_to_string(info.name).unwrap_or("".to_string()),
+                    description: self.sword_ptr_to_string(info.description).unwrap_or("".to_string()),
+                    category: self.sword_ptr_to_string(info.category).unwrap_or("".to_string()),
+                    language: self.from_code(self.sword_ptr_to_string(info.language).unwrap_or("".to_string()).as_str()),
                     source: "Local".to_string(),
-                    version: self.ptr_to_str(info.version),
-                    delta: self.ptr_to_str(info.delta),
-                    cipher_key: self.ptr_to_str(info.cipherKey),
+                    version: self.sword_ptr_to_string(info.version).unwrap_or("".to_string()),
+                    delta: self.sword_ptr_to_string(info.delta).unwrap_or("".to_string()),
+                    cipher_key: self.sword_ptr_to_string(info.cipherKey).unwrap_or("".to_string()),
                     features: features_vec, // Assign the Vec<String> here
                     signature_color: ModuleColor::generate(&color_hash),
                 });
@@ -374,14 +374,6 @@ impl ModuleEngine {
 
     // ------------------- HELPERS -------------------
 
-    fn ptr_to_str(&self, ptr: *const i8) -> String {
-        if ptr.is_null() {
-            "Unknown".to_string()
-        } else {
-            unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
-        }
-    }
-
     fn get_sword_path() -> PathBuf {
         let proj_dirs = ProjectDirs::from("org", "flame", "xbible").expect("Path error");
         let path = proj_dirs.data_local_dir().to_path_buf();
@@ -390,11 +382,11 @@ impl ModuleEngine {
     }
 
     fn prepare_app_directory(path: &PathBuf) {
-        // 1. Create the fundamental SWORD structure
+        // Create the fundamental SWORD structure
         let _ = fs::create_dir_all(path.join("mods.d"));
         let _ = fs::create_dir_all(path.join("modules"));
 
-        // 2. CRITICAL: Create the specific folder the InstallMgr uses for Remote Sources
+        // CRITICAL: Create the specific folder the InstallMgr uses for Remote Sources
         // If this isn't here, the 'syncConfig' download has nowhere to land.
         let sources = ["Bible.org", "CrossWire", "CrossWire Attic", "CrossWire Beta", "CrossWire Wycliffe", "Deutsche Bibelgesellschaft", "IBT", "Lockman Foundation", "STEP Bible", "Xiphos", "eBible.org"];
         for source in &sources {

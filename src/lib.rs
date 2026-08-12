@@ -7,10 +7,7 @@ pub mod ffi {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
-#[uniffi::export]
-pub fn make_sentence(words: Vec<String>) -> String{
-    words.join(" ")
-}
 
 pub mod engines;
 pub mod runtime;
+pub mod data;

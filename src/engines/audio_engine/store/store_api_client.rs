@@ -88,12 +88,12 @@ pub struct StoreApiClient {
 
 #[derive(Debug, Clone, thiserror::Error, uniffi::Error)]
 pub enum StoreApiError {
-    #[error("Network infrastructure failure: {message}")]
-    NetworkFailure { message: String },
-    #[error("API Deserialization payload error: {message}")]
-    SerializationFailure { message: String },
-    #[error("Local filesystem file I/O layout drop: {message}")]
-    IoFailure { message: String },
+    #[error("Network infrastructure failure: {error_message}")]
+    NetworkFailure { error_message: String },
+    #[error("API Deserialization payload error: {error_message}")]
+    SerializationFailure { error_message: String },
+    #[error("Local filesystem file I/O layout drop: {error_message}")]
+    IoFailure { error_message: String },
 }
 
 pub trait RustDownloadProgressHandler: Send + Sync {
@@ -194,17 +194,17 @@ impl StoreApiClient {
         let response = request
             .send()
             .await
-            .map_err(|e| StoreApiError::NetworkFailure { message: e.to_string() })?
+            .map_err(|e| StoreApiError::NetworkFailure { error_message: e.to_string() })?
             .json::<serde_json::Value>()
             .await
-            .map_err(|e| StoreApiError::SerializationFailure { message: e.to_string() })?;
+            .map_err(|e| StoreApiError::SerializationFailure { error_message: e.to_string() })?;
 
         let data_section = response.get("data").ok_or_else(|| {
-            StoreApiError::SerializationFailure { message: "No 'data' field".to_string() }
+            StoreApiError::SerializationFailure { error_message: "No 'data' field".to_string() }
         })?;
 
         let parsed: HygraphAudioResponse = serde_json::from_value(data_section.clone()).map_err(|e| {
-            StoreApiError::SerializationFailure { message: e.to_string() }
+            StoreApiError::SerializationFailure { error_message: e.to_string() }
         })?;
 
         Ok(parsed.audio_modules)
@@ -243,7 +243,7 @@ impl StoreApiClient {
         }
 
         let response = req_builder.send().await.map_err(|e| StoreApiError::NetworkFailure {
-            message: format!("Handshake initialization failure: {}", e),
+            error_message: format!("Handshake initialization failure: {}", e),
         })?;
 
         let status = response.status();
@@ -276,7 +276,7 @@ impl StoreApiClient {
             .open(&destination_path)
             .await
             .map_err(|e| StoreApiError::IoFailure {
-                message: format!("Failed to open local storage destination: {}", e),
+                error_message: format!("Failed to open local storage destination: {}", e),
             })?;
 
         let chunk_threshold = match total_size {
@@ -311,7 +311,7 @@ impl StoreApiClient {
                 .write_all(&chunk)
                 .await
                 .map_err(|e| StoreApiError::IoFailure {
-                    message: format!("Disk storage partition write failure: {}", e),
+                    error_message: format!("Disk storage partition write failure: {}", e),
                 })?;
 
             bytes_written += chunk.len() as u64;
@@ -345,7 +345,7 @@ impl StoreApiClient {
             .flush()
             .await
             .map_err(|e| StoreApiError::IoFailure {
-                message: format!("Failed to finalize cache disk allocations: {}", e),
+                error_message: format!("Failed to finalize cache disk allocations: {}", e),
             })?;
 
         println!("[{}] Download completed successfully!", module.unique_id);

@@ -126,7 +126,10 @@ fn main() {
     let cfg: toml::Value = cfg_text.parse().expect("Failed to parse cpp-bindings.toml");
 
     let git_url = cfg["git_url"].as_str().unwrap();
-    let git_rev = cfg.get("git_rev").and_then(|v| v.as_str()).unwrap_or("HEAD");
+    let git_rev = cfg
+        .get("git_rev")
+        .and_then(|v| v.as_str())
+        .unwrap_or("HEAD");
 
     // Handle variable naming options between configurations for clone path localization
     let sword_src = manifest_dir.join("sword");
@@ -151,7 +154,11 @@ fn main() {
 
     if target_os == "ios" {
         let is_sim = target_triple.contains("sim") || target_triple.contains("ios-sim");
-        let sdk_name = if is_sim { "iphonesimulator" } else { "iphoneos" };
+        let sdk_name = if is_sim {
+            "iphonesimulator"
+        } else {
+            "iphoneos"
+        };
         sdk_name_flag = Some(sdk_name.to_string());
 
         let sdk_output = Command::new("xcrun")
@@ -159,7 +166,9 @@ fn main() {
             .output()
             .expect("xcrun failed");
 
-        let sdk_path_str = String::from_utf8_lossy(&sdk_output.stdout).trim().to_string();
+        let sdk_path_str = String::from_utf8_lossy(&sdk_output.stdout)
+            .trim()
+            .to_string();
         let sdk_usr = Path::new(&sdk_path_str).join("usr");
         sdk_inc_path = Some(sdk_usr.join("include").to_string_lossy().into_owned());
     }
@@ -192,7 +201,11 @@ fn main() {
 
     // Pull Host/Target Architecture strings matching raw structural layout rules
     let raw_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "arm64".to_string());
-    let arch = if raw_arch == "aarch64" { "arm64" } else { &raw_arch };
+    let arch = if raw_arch == "aarch64" {
+        "arm64"
+    } else {
+        &raw_arch
+    };
 
     match target_os.as_str() {
         "ios" => {
@@ -231,10 +244,18 @@ fn main() {
                 if tc.exists() {
                     cmake.define("CMAKE_TOOLCHAIN_FILE", tc.to_str().unwrap());
                 }
-                let abi = if target_triple.contains("x86_64") { "x86_64" } else { "arm64-v8a" };
+                let abi = if target_triple.contains("x86_64") {
+                    "x86_64"
+                } else {
+                    "arm64-v8a"
+                };
                 cmake
+                    .define("SWORD_CURL", "OFF")
                     .define("ANDROID_ABI", abi)
-                    .define("ANDROID_PLATFORM", "android-21");
+                    .define("ANDROID_PLATFORM", "android-24")
+                    .define("CMAKE_SHARED_LINKER_FLAGS", "-llog")
+                    .cflag("-DIOAPI_NO_64")
+                    .cxxflag("-DIOAPI_NO_64");
             }
         }
         _ => {}
@@ -279,7 +300,8 @@ fn main() {
             println!("cargo:rustc-link-lib=framework=SystemConfiguration");
         }
         "android" => {
-            println!("cargo:rustc-link-lib=dylib=curl");
+            //println!("cargo:rustc-link-lib=dylib=curl");
+            cmake.define("SWORD_CURL", "OFF");
             println!("cargo:rustc-link-lib=dylib=z");
             println!("cargo:rustc-link-lib=dylib=c++_shared");
             println!("cargo:rustc-link-lib=dylib=log");
@@ -320,6 +342,22 @@ fn main() {
     if target_os == "ios" || target_os == "macos" {
         if let Ok(sdk) = env::var("SDKROOT") {
             builder = builder.clang_arg(format!("--sysroot={}", sdk));
+        }
+    }
+
+    if target_os == "android" {
+        if let Ok(ndk) = env::var("ANDROID_NDK_HOME") {
+            let sysroot = Path::new(&ndk).join("toolchains/llvm/prebuilt/darwin-x86_64/sysroot");
+            let clang_target = if target_triple.contains("x86_64") {
+                "x86_64-linux-android24"
+            } else if target_triple.contains("aarch64") {
+                "aarch64-linux-android24"
+            } else {
+                "armv7a-linux-androideabi24"
+            };
+            builder = builder
+                .clang_arg(format!("--target={}", clang_target))
+                .clang_arg(format!("--sysroot={}", sysroot.display()));
         }
     }
 
