@@ -78,7 +78,7 @@ impl ModuleEngine {
             // to ensure string parsing doesn't crash during immediate teardown
             let message = unsafe { CStr::from_ptr(msg).to_string_lossy() };
             info!(
-                "[ModuleEngine] Progress: {}/{} - {}",
+                "Progress: {}/{} - {}",
                 completed, total, message
             );
         }
@@ -392,7 +392,6 @@ impl ModuleEngine {
         }
 
         let abs_path_str = path.to_string_lossy().replace("\\", "/");
-        debug!("absolute path: {}", abs_path_str);
         let conf_path = path.join("sword.conf");
 
         // Use the absolute path for DataPath.
