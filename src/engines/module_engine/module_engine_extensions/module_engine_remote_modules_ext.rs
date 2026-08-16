@@ -26,7 +26,7 @@ impl ModuleEngine {
         }
 
         if sources.is_empty() {
-            println!("[ModuleEngine] No remote sources found, using default sources");
+            info!("[ModuleEngine] No remote sources found, using default sources");
             sources = vec![
                 "CrossWire".to_string(),
                 "IBT".to_string(),
@@ -34,7 +34,7 @@ impl ModuleEngine {
             ];
         }
 
-        println!("[ModuleEngine] Remote sources: {:?}", sources);
+        debug!("[ModuleEngine] Remote sources: {:?}", sources);
         sources
     }
 
@@ -126,7 +126,7 @@ impl ModuleEngine {
                 org_crosswire_sword_InstallMgr_new(c_path.as_ptr(), Some(Self::status_reporter));
             let local_mgr = org_crosswire_sword_SWMgr_newWithPath(c_path.as_ptr());
 
-            println!(
+            debug!(
                 "[ModuleEngine] Installing '{}' from '{}' (Background)",
                 module_name, source
             );
@@ -145,13 +145,13 @@ impl ModuleEngine {
                 c_source.as_ptr(),
                 c_mod.as_ptr(),
             );
-            println!("[ModuleEngine] Install result: {}", res);
+            debug!("[ModuleEngine] Install result: {}", res);
 
             org_crosswire_sword_SWMgr_delete(local_mgr);
             org_crosswire_sword_InstallMgr_delete(local_install_mgr);
 
             if res == 0 {
-                println!(
+                debug!(
                     "[ModuleEngine] Installation successful, refreshing main engine awareness"
                 );
                 let mut inner = self.inner.lock().unwrap();

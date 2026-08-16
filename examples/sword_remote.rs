@@ -108,7 +108,7 @@ fn main() {
         }
 
         // Safely extract the compiled vector from the synchronization guard shell
-        let mut remote_modules = match Arc::try_unwrap(remote_modules_aggr) {
+        let remote_modules = match Arc::try_unwrap(remote_modules_aggr) {
             Ok(mutex) => mutex.into_inner().unwrap_or_default(),
             Err(mutex) => mutex.lock().unwrap().clone(),
         };
@@ -214,6 +214,11 @@ fn main() {
             }
             EngineStep::Finished => {
                 println!("🎉 SUCCESS: All remote engine tasks executed with 0 crashes.");
+
+                //check availabel modules
+                let available_modules = engine.get_available_modules();
+                println!("Available Modules now are");
+                println!("{:?}", available_modules);
                 break;
             }
         }

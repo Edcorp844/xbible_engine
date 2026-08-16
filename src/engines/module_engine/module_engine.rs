@@ -50,7 +50,7 @@ impl ModuleEngine {
             org_crosswire_sword_InstallMgr_setUserDisclaimerConfirmed(install_mgr);
             org_crosswire_sword_InstallMgr_syncConfig(install_mgr);
 
-            println!("[ModuleEngine] Initializing SWMgr...");
+            info!("[ModuleEngine] Initializing SWMgr...");
             let mgr = org_crosswire_sword_SWMgr_newWithPath(c_path.as_ptr());
 
             let utf8_key = CString::new("UTF8").unwrap();
@@ -77,7 +77,7 @@ impl ModuleEngine {
             // Defensive check: wrap in a catch_unwind or direct pointer check
             // to ensure string parsing doesn't crash during immediate teardown
             let message = unsafe { CStr::from_ptr(msg).to_string_lossy() };
-            println!(
+            info!(
                 "[ModuleEngine] Progress: {}/{} - {}",
                 completed, total, message
             );
@@ -85,7 +85,7 @@ impl ModuleEngine {
     }
 
     pub unsafe fn rebuild_mgr(&self, inner: &mut SwordInner) {
-        println!("[ModuleEngine] Rebuilding SWMgr...");
+        debug!("[ModuleEngine] Rebuilding SWMgr...");
         unsafe { org_crosswire_sword_SWMgr_delete(inner.mgr) };
 
         let path_str = self.sword_path.to_string_lossy().replace("\\", "/");
@@ -104,7 +104,7 @@ impl ModuleEngine {
             org_crosswire_sword_InstallMgr_syncConfig(inner.install_mgr);
         };
 
-        println!("[ModuleEngine] SWMgr rebuilt successfully");
+        debug!("[ModuleEngine] SWMgr rebuilt successfully");
     }
 
     // ------------------- LOCAL MODULES -------------------
@@ -166,9 +166,6 @@ impl ModuleEngine {
             .into_iter()
             .filter(|m| categories.contains(&m.category.as_str()))
             .collect();
-
-        //println!("MODULES: {:?}", modules);
-
         modules
     }
 
@@ -263,16 +260,16 @@ impl ModuleEngine {
         let mut inner = self.inner.lock().unwrap();
 
         unsafe {
-            println!("[ModuleEngine] Uninstalling module: {}", module_name);
+            info!("[ModuleEngine] Uninstalling module: {}", module_name);
             let res = org_crosswire_sword_InstallMgr_uninstallModule(
                 inner.install_mgr,
                 inner.mgr,
                 c_mod.as_ptr(),
             );
-            println!("[ModuleEngine] Uninstall result: {}", res);
+            debug!("[ModuleEngine] Uninstall result: {}", res);
 
             if res == 0 {
-                println!(
+                info!(
                     "[ModuleEngine] Uninstallation successful, refreshing main engine awareness"
                 );
                 self.rebuild_mgr(&mut inner);
@@ -395,7 +392,7 @@ impl ModuleEngine {
         }
 
         let abs_path_str = path.to_string_lossy().replace("\\", "/");
-        println!("absolute path: {}", abs_path_str);
+        debug!("absolute path: {}", abs_path_str);
         let conf_path = path.join("sword.conf");
 
         // Use the absolute path for DataPath.
@@ -440,7 +437,7 @@ impl Drop for ModuleEngine {
     fn drop(&mut self) {
         let inner = self.inner.lock().unwrap();
         unsafe {
-            println!("[ModuleEngine] Cleaning up SWORD handles...");
+            info!("[ModuleEngine] Cleaning up SWORD handles...");
             org_crosswire_sword_InstallMgr_delete(inner.install_mgr);
             org_crosswire_sword_SWMgr_delete(inner.mgr);
         }

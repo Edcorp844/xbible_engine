@@ -145,35 +145,4 @@ impl ModuleEngine{
             }
         }
     }
-
-    // fn get_dictionary_entry_direct(&self, module_name: &str, key: &str) -> Option<String> {
-    //     let inner = self.inner.lock().unwrap();
-    //     unsafe {
-    //         let c_mod = CString::new(module_name).ok()?;
-    //         let c_key = CString::new(key).ok()?;
-    //         let h_mgr = inner.mgr;
-    //         let h_mod = org_crosswire_sword_SWMgr_getModuleByName(h_mgr, c_mod.as_ptr());
-
-    //         if h_mod == 0 {
-    //             return None;
-    //         }
-
-    //         org_crosswire_sword_SWModule_setKeyText(h_mod, c_key.as_ptr());
-    //         if org_crosswire_sword_SWModule_popError(h_mod) != 0 {
-    //             return None;
-    //         }
-
-    //         let text_ptr = org_crosswire_sword_SWModule_renderText(h_mod);
-    //         if text_ptr.is_null() {
-    //             return None;
-    //         }
-
-    //         let text = CStr::from_ptr(text_ptr).to_string_lossy().into_owned();
-    //         if text.trim().is_empty() {
-    //             None
-    //         } else {
-    //             Some(text)
-    //         }
-    //     }
-    // }
 }

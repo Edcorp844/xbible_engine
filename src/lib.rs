@@ -7,6 +7,8 @@ pub mod ffi {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
+#[macro_use]
+extern crate log;
 
 pub mod engines;
 pub mod runtime;

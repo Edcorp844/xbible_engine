@@ -135,7 +135,7 @@ impl ModuleEngine {
             unsafe { org_crosswire_sword_SWMgr_getModuleByName(inner.mgr, mod_name.as_ptr()) };
 
         if h_mod == 0 {
-            eprintln!("[SWORD ERROR]: Module '{}' not found!", module.name);
+            error!("[SWORD ERROR]: Module '{}' not found!", module.name);
             return Vec::new();
         }
 
@@ -157,7 +157,7 @@ impl ModuleEngine {
             None => return Vec::new(),
         };
 
-        println!(
+        info!(
             "\n--- [DUMPING RAW OSIS FOR {} {}] ---",
             target_book, target_chapter
         );
@@ -184,7 +184,7 @@ impl ModuleEngine {
             if let Some(raw_xml) =
                 unsafe { self.sword_ptr_to_string(org_crosswire_sword_SWModule_getRawEntry(h_mod)) }
             {
-                println!("[KEY: {}] RAW OSIS: {}", current_key, raw_xml);
+                info!("[KEY: {}] RAW OSIS: {}", current_key, raw_xml);
                 raw_entries.push((current_key, raw_xml));
             }
 

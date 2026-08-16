@@ -25,6 +25,7 @@ reqwest = {version = "0.13.4", features = [ "json", "stream", ] }
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "fs"] }
 futures-util = { version = "0.3.32", features = ["alloc"] }
 bytes = "1.11.1"
+log = "0.4.33"
 
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]
