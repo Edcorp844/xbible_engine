@@ -1,6 +1,7 @@
 use xbible_engine::engines::{module_engine::module_engine_extensions::module_engine_lexicon_ext::LexiconQuery, xbible_engine::engine::XBibleEngine};
 
 fn main() {
+    xbible_engine::init_logging();
     let engine = XBibleEngine::new();
 
     let greek_query = "G3056"; // Example Strong's number for "agape" (love) in Greek

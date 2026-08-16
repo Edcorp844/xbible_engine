@@ -42,7 +42,7 @@ impl ModuleEngine {
         let c_path = CString::new(path_str.clone()).unwrap();
 
         unsafe {
-            println!("[ModuleEngine] Initializing InstallMgr at: {}", path_str);
+            info!("[ModuleEngine] Initializing InstallMgr at: {}", path_str);
             let install_mgr =
                 org_crosswire_sword_InstallMgr_new(c_path.as_ptr(), Some(Self::status_reporter));
 
@@ -50,7 +50,7 @@ impl ModuleEngine {
             org_crosswire_sword_InstallMgr_setUserDisclaimerConfirmed(install_mgr);
             org_crosswire_sword_InstallMgr_syncConfig(install_mgr);
 
-            info!("[ModuleEngine] Initializing SWMgr...");
+            info!("[ModuleEngine] Initializing SWMgr");
             let mgr = org_crosswire_sword_SWMgr_newWithPath(c_path.as_ptr());
 
             let utf8_key = CString::new("UTF8").unwrap();

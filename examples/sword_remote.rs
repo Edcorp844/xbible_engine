@@ -28,6 +28,8 @@ struct AppState {
 
 fn main() {
     println!("🚀 Starting Engine Monitor Context...");
+
+    xbible_engine::init_logging();
     
     // Initialize the engine core safely
     let engine = Arc::new(XBibleEngine::new());

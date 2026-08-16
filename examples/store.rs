@@ -26,6 +26,7 @@ impl RustDownloadProgressHandler for TerminalProgressPrinter {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    xbible_engine::init_logging();
     let endpoint =
         "https://ap-south-1.cdn.hygraph.com/content/cmpwxdh8104yx07w6h1ffpokb/master".to_string();
     let client = StoreApiClient::new(endpoint, None);
