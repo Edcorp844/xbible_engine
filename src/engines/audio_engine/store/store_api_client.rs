@@ -239,7 +239,7 @@ impl StoreApiClient {
                 reqwest::header::RANGE,
                 format!("bytes={}-", initial_bytes),
             );
-            dbg!("[{}] Found partial download. Attempting to resume from {} bytes...", module.unique_id, initial_bytes);
+            dbg!("[{}] Found partial download. Attempting to resume from {} bytes...", module.unique_id.clone(), initial_bytes);
         }
 
         let response = req_builder.send().await.map_err(|e| StoreApiError::NetworkFailure {
@@ -262,7 +262,7 @@ impl StoreApiClient {
         // If the local file matches or exceeds the server size, it's already done
         if let Some(total) = total_size {
             if initial_bytes >= total && total > 0 {
-                debug!("[{}] Module already fully downloaded offline.", module.unique_id);
+                debug!("[{}] Module already fully downloaded offline.", module.unique_id.clone());
                 progress_listener.on_progress(module.unique_id.clone(), total, Some(total));
                 return Ok(destination_path.to_string_lossy().into_owned());
             }
