@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use log::info;
 use xbible_engine::engines::audio_engine::store::store_api_client::{
     RustDownloadProgressHandler, StoreApiClient, StoreDownloadProgressListener,
 };
