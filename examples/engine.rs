@@ -1,3 +1,4 @@
+use log::info;
 use xbible_engine::engines::{module_engine::module_engine_extensions::module_engine_lexicon_ext::LexiconQuery, xbible_engine::engine::XBibleEngine};
 
 fn main() {
@@ -11,9 +12,9 @@ fn main() {
     let language_hebrew = "Hebrew";
 
     let dict_modules = engine.get_dictionary_modules();
-    println!("Available dictionary modules:");
+    info!("Available dictionary modules:");
     for module in &dict_modules {
-        println!(" - {} (Language: {})", module.name, module.language);
+        info!(" - {} (Language: {})", module.name, module.language);
     }
     
     let lexicon_query = LexiconQuery {
@@ -28,9 +29,9 @@ fn main() {
 
     let response = engine.lookup_strongs_number(lexicon_query);
 
-    println!("Lexicon results for {}: {} total results", greek_query, response.results.len());
+    info!("Lexicon results for {}: {} total results", greek_query, response.results.len());
     for result in &response.results {
-        println!("  - Module: {}, Key: {}", result.module_name, result.key);
+        info!("  - Module: {}, Key: {}", result.module_name, result.key);
     }
     
     // Also test H5501 which we know works
@@ -39,9 +40,9 @@ fn main() {
         language: "Hebrew".to_string(),
     };
     let hebrew_resp = engine.lookup_strongs_number(hebrew_test);
-    println!("\nLexicon results for H5501 (Hebrew): {} total results", hebrew_resp.results.len());
+    info!("\nLexicon results for H5501 (Hebrew): {} total results", hebrew_resp.results.len());
     for result in &hebrew_resp.results {
-        println!("  - Module: {}, Key: {}", result.module_name, result.key);
+        info!("  - Module: {}, Key: {}", result.module_name, result.key);
     }
     
     // Test without language
@@ -50,12 +51,12 @@ fn main() {
         language: "".to_string(),
     };
     let hebrew_resp2 = engine.lookup_strongs_number(hebrew_test2);
-    println!("\nLexicon results for H5501 (no language): {} total results", hebrew_resp2.results.len());
+    info!("\nLexicon results for H5501 (no language): {} total results", hebrew_resp2.results.len());
     for result in &hebrew_resp2.results {
-        println!("  - Module: {}, Key: {}", result.module_name, result.key);
+        info!("  - Module: {}, Key: {}", result.module_name, result.key);
     }
 
     let hebrew_response = engine.lookup_strongs_number(hebrew_lexicon_query);
 
-    println!("Lexicon results for {}: {:?}", hebrew_query, hebrew_response);
+    info!("Lexicon results for {}: {:?}", hebrew_query, hebrew_response);
 }

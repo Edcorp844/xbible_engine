@@ -192,7 +192,7 @@ impl AudioEngine {
 
         let file = File::open(path)?;
         let mut archive = zip::ZipArchive::new(file).map_err(|e| AudioEngineError::IoFailure {
-            error_message: format!("Invalid ZIP archive structure: {}", e),
+            error_message: format!("Invalid archive structure: {}", e),
         })?;
 
         let metadata: Option<ModuleMetadata> = self.read_module_metadata_peek(path);

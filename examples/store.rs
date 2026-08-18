@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let available_modules = client.fetch_audio_modules().await?;
 
     if let Some(first_module) = available_modules.first() {
-        println!(
+        info!(
             "Downloading package profile: {}",
             first_module.display_title
         );
@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .download_and_install_module(first_module.clone(), target_dir, progress_listener)
             .await?;
 
-        println!("\n\nArchive box cleanly targeted at: {}", saved_path_string);
+        info!("\n\nArchive box cleanly targeted at: {}", saved_path_string);
     }
     Ok(())
 }

@@ -239,7 +239,7 @@ impl StoreApiClient {
                 reqwest::header::RANGE,
                 format!("bytes={}-", initial_bytes),
             );
-            println!("[{}] Found partial download. Attempting to resume from {} bytes...", module.unique_id, initial_bytes);
+            dbg!("[{}] Found partial download. Attempting to resume from {} bytes...", module.unique_id, initial_bytes);
         }
 
         let response = req_builder.send().await.map_err(|e| StoreApiError::NetworkFailure {
@@ -262,7 +262,7 @@ impl StoreApiClient {
         // If the local file matches or exceeds the server size, it's already done
         if let Some(total) = total_size {
             if initial_bytes >= total && total > 0 {
-                println!("[{}] Module already fully downloaded offline.", module.unique_id);
+                debug!("[{}] Module already fully downloaded offline.", module.unique_id);
                 progress_listener.on_progress(module.unique_id.clone(), total, Some(total));
                 return Ok(destination_path.to_string_lossy().into_owned());
             }
@@ -325,7 +325,7 @@ impl StoreApiClient {
                     _ => 0.0,
                 };
 
-                println!(
+                info!(
                     "[{}] Downloading: {:.2}% ({}/{:?} bytes)",
                     module.unique_id, percentage, bytes_written, total_size
                 );
@@ -348,7 +348,7 @@ impl StoreApiClient {
                 error_message: format!("Failed to finalize cache disk allocations: {}", e),
             })?;
 
-        println!("[{}] Download completed successfully!", module.unique_id);
+        info!("[{}] Download completed successfully!", module.unique_id);
         progress_listener.on_progress(module.unique_id.clone(), bytes_written, total_size);
 
         Ok(destination_path.to_string_lossy().into_owned())

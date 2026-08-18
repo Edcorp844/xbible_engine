@@ -1,10 +1,10 @@
-use crate::engines::module_engine::{module_engine::ModuleEngine, sword_module::module::SwordModule};
+use crate::engines::module_engine::{
+    module_engine::ModuleEngine, sword_module::module::SwordModule,
+};
 use crate::engines::osis_translation_engine::engine::OsisTransilationEngine;
 use crate::ffi::*;
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
-
-
 
 // --- DATA STRUCTURES ---
 
@@ -86,7 +86,6 @@ impl ModuleEngine {
         if let Some(raw_osis) =
             unsafe { self.sword_ptr_to_string(org_crosswire_sword_SWModule_getRawEntry(h_mod)) }
         {
-            //println!("[SINGLE ENTRY RAW]: {}", raw_osis);
             return osis_engine.parse_osis_to_sections(
                 module.language.clone(),
                 &raw_osis,
@@ -139,11 +138,8 @@ impl ModuleEngine {
             return Vec::new();
         }
 
-        let opt_name = CString::new("Headings").unwrap();
-        let opt_on = CString::new("On").unwrap();
-        unsafe {
-            org_crosswire_sword_SWMgr_setGlobalOption(inner.mgr, opt_name.as_ptr(), opt_on.as_ptr())
-        };
+        let options = ["Headings"];
+        unsafe { self.set_global_options(&options, "On") };
 
         let c_ref = CString::new(reference).unwrap();
         unsafe { org_crosswire_sword_SWModule_setKeyText(h_mod, c_ref.as_ptr()) };

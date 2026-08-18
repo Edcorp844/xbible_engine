@@ -11,9 +11,9 @@ pub mod ffi {
 #[macro_use]
 extern crate log;
 
+#[uniffi::export]
 #[unsafe(no_mangle)]
 pub extern "C" fn init_logging() {
-    // 1. Android -> Logcat
     #[cfg(target_os = "android")]
     {
         android_logger::init_once(
@@ -23,7 +23,6 @@ pub extern "C" fn init_logging() {
         );
     }
 
-    // 2. All Non-Android Targets (macOS, iOS, Windows, Linux)
     #[cfg(not(target_os = "android"))]
     {
         // Try initializing terminal logger first (captures stdout for cargo run/test on macOS/Linux/Windows)
@@ -32,7 +31,6 @@ pub extern "C" fn init_logging() {
             .is_test(true)
             .try_init();
 
-        // On Apple platforms, if env_logger didn't initialize (e.g. running inside an app bundle without terminal stdout), fallback to OSLog
         #[cfg(any(target_os = "ios", target_os = "macos"))]
         if env_init.is_err() {
             let _ = oslog::OsLogger::new("com.xbible.engine")

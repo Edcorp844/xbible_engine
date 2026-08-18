@@ -1,3 +1,4 @@
+use log::{error, info};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -7,7 +8,11 @@ use xbible_engine::engines::xbible_engine::engine::XBibleEngine;
 #[derive(Clone, Debug, PartialEq)]
 enum EngineStep {
     Initializing,
-    FetchingSources { current: usize, total: usize, active_source: String },
+    FetchingSources {
+        current: usize,
+        total: usize,
+        active_source: String,
+    },
     ProcessingSelection,
     InstallingModules,
     Failed(String),
@@ -27,13 +32,13 @@ struct AppState {
 }
 
 fn main() {
-    println!("🚀 Starting Engine Monitor Context...");
+    info!("🚀 Starting Engine Monitor Context...");
 
     xbible_engine::init_logging();
-    
+
     // Initialize the engine core safely
     let engine = Arc::new(XBibleEngine::new());
-    
+
     let state = Arc::new(Mutex::new(AppState {
         current_step: EngineStep::Initializing,
         installers: Vec::new(),
@@ -58,7 +63,9 @@ fn main() {
         let total_sources = sources.len();
 
         if sources.is_empty() {
-            set_step(EngineStep::Failed("No remote sources are configured in the engine context.".to_string()));
+            set_step(EngineStep::Failed(
+                "No remote sources are configured in the engine context.".to_string(),
+            ));
             return;
         }
 
@@ -73,14 +80,14 @@ fn main() {
             let modules_cp = Arc::clone(&remote_modules_aggr);
             let completed_cp = Arc::clone(&completed_sources);
             let state_cp = Arc::clone(&state_worker);
-            
+
             // Adjust `.name` or formatting depending on what your Engine Source struct fields look like
-            let source_identifier = format!("{:?}", source); 
+            let source_identifier = format!("{:?}", source);
 
             let handle = thread::spawn(move || {
                 // Network network bound sync operation (Runs concurrently across cores)
                 let mut modules = engine_cp.fetch_remote_modules(&source);
-                
+
                 if !modules.is_empty() {
                     if let Ok(mut master_list) = modules_cp.lock() {
                         master_list.append(&mut modules);
@@ -116,7 +123,9 @@ fn main() {
         };
 
         if remote_modules.is_empty() {
-            set_step(EngineStep::Failed("Network aggregation returned zero remote modules across all sources.".to_string()));
+            set_step(EngineStep::Failed(
+                "Network aggregation returned zero remote modules across all sources.".to_string(),
+            ));
             return;
         }
 
@@ -128,7 +137,7 @@ fn main() {
         let selected_modules: Vec<String> = remote_modules
             .iter()
             .take(target_count)
-            .map(|m| m.name.clone()) 
+            .map(|m| m.name.clone())
             .collect();
 
         {
@@ -153,11 +162,11 @@ fn main() {
                 }
             }
 
-            // Real execution binding placement hook: 
+            // Real execution binding placement hook:
             // engine_worker.install_module(&selected_modules[i]);
             for progress_tick in 1..=100 {
                 thread::sleep(Duration::from_millis(25));
-                
+
                 if let Ok(mut s) = state_worker.lock() {
                     s.installers[i].progress = progress_tick as f32 / 100.0;
                 }
@@ -182,45 +191,51 @@ fn main() {
         };
 
         // Clear terminal screen completely
-        print!("{}[2J{}[H", 27 as char, 27 as char);
-        println!("🛰️  === ENGINE PROCESS SYNCHRONIZATION MONITOR ===");
-        println!("--------------------------------------------------");
+        info!("{}[2J{}[H", 27 as char, 27 as char);
+        info!("🛰️  === ENGINE PROCESS SYNCHRONIZATION MONITOR ===");
+        info!("--------------------------------------------------");
 
         match &current_state.current_step {
             EngineStep::Initializing => {
-                println!("⏳ Hooking FFI bindings and initializing network subsystems...");
+                info!("⏳ Hooking FFI bindings and initializing network subsystems...");
             }
-            EngineStep::FetchingSources { current, total, active_source } => {
-                println!("📡 STATUS: Fetching Remote Source Catalogs (Parallel)");
-                println!("📦 Progress: Source [{}/{}]", current, total);
-                println!("🔍 Last active worker read: {}", active_source);
-                print!("   Total Sync Progress: ");
+            EngineStep::FetchingSources {
+                current,
+                total,
+                active_source,
+            } => {
+                info!("📡 STATUS: Fetching Remote Source Catalogs (Parallel)");
+                info!("📦 Progress: Source [{}/{}]", current, total);
+                info!("🔍 Last active worker read: {}", active_source);
+                info!("   Total Sync Progress: ");
                 render_progress_bar(current_state.global_progress);
             }
             EngineStep::ProcessingSelection => {
-                println!("📦 STATUS: Unifying Distributed Module Inventories...");
-                println!("🧬 Selecting target testing payloads safely...");
+                info!("📦 STATUS: Unifying Distributed Module Inventories...");
+                info!("🧬 Selecting target testing payloads safely...");
             }
             EngineStep::InstallingModules => {
-                println!("📥 STATUS: Installing Module Packages");
-                println!("--------------------------------------------------");
+                info!("📥 STATUS: Installing Module Packages");
+                info!("--------------------------------------------------");
                 for tracker in current_state.installers.iter() {
-                    print!("📍 Module: {:<14} | Status: {:<10} | ", tracker.module_name, tracker.status);
+                    info!(
+                        "📍 Module: {:<14} | Status: {:<10} | ",
+                        tracker.module_name, tracker.status
+                    );
                     render_progress_bar(tracker.progress);
                 }
             }
             EngineStep::Failed(err_message) => {
-                println!("❌ PIPELINE ERROR DETECTED");
-                println!("⚠️ Reason: {}", err_message);
+                error!("❌ PIPELINE ERROR DETECTED: {}", err_message);
                 break;
             }
             EngineStep::Finished => {
-                println!("🎉 SUCCESS: All remote engine tasks executed with 0 crashes.");
+                info!("🎉 SUCCESS: All remote engine tasks executed with 0 crashes.");
 
                 //check availabel modules
                 let available_modules = engine.get_available_modules();
-                println!("Available Modules now are");
-                println!("{:?}", available_modules);
+                info!("Available Modules now are");
+                info!("{:?}", available_modules);
                 break;
             }
         }
@@ -237,8 +252,8 @@ fn render_progress_bar(progress: f32) {
     let bar_width: i32 = 20;
     let filled_width = (progress * bar_width as f32).round() as i32;
     let empty_width = bar_width.saturating_sub(filled_width);
-    
-    println!(
+
+    info!(
         "[{}{}] {:.1}%",
         "█".repeat(filled_width as usize),
         "-".repeat(empty_width as usize),

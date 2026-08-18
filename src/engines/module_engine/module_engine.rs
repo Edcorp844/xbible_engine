@@ -77,10 +77,7 @@ impl ModuleEngine {
             // Defensive check: wrap in a catch_unwind or direct pointer check
             // to ensure string parsing doesn't crash during immediate teardown
             let message = unsafe { CStr::from_ptr(msg).to_string_lossy() };
-            info!(
-                "Progress: {}/{} - {}",
-                completed, total, message
-            );
+            info!("Progress: {}/{} - {}", completed, total, message);
         }
     }
 
@@ -93,10 +90,8 @@ impl ModuleEngine {
 
         inner.mgr = unsafe { org_crosswire_sword_SWMgr_newWithPath(c_path.as_ptr()) };
 
-        let utf8_key = CString::new("UTF8").unwrap();
-        let on_val = CString::new("true").unwrap();
         unsafe {
-            org_crosswire_sword_SWMgr_setGlobalOption(inner.mgr, utf8_key.as_ptr(), on_val.as_ptr())
+            self.set_global_options(&["UTF8"], "true");
         };
 
         // Also sync the InstallMgr config to refresh local module detection
@@ -135,28 +130,44 @@ impl ModuleEngine {
 
                 let color_hash = format!(
                     "{}{}",
-                    self.sword_ptr_to_string((*ptr).name).unwrap_or("".to_string()),
-                    self.sword_ptr_to_string((*ptr).description).unwrap_or("".to_string())
+                    self.sword_ptr_to_string((*ptr).name)
+                        .unwrap_or("".to_string()),
+                    self.sword_ptr_to_string((*ptr).description)
+                        .unwrap_or("".to_string())
                 );
 
                 modules.push(SwordModule {
-                    name: self.sword_ptr_to_string(info.name).unwrap_or("".to_string()),
-                    description: self.sword_ptr_to_string(info.description).unwrap_or("".to_string()),
-                    category: self.sword_ptr_to_string(info.category).unwrap_or("".to_string()),
-                    language: self.from_code(self.sword_ptr_to_string(info.language).unwrap_or("".to_string()).as_str()),
+                    name: self
+                        .sword_ptr_to_string(info.name)
+                        .unwrap_or("".to_string()),
+                    description: self
+                        .sword_ptr_to_string(info.description)
+                        .unwrap_or("".to_string()),
+                    category: self
+                        .sword_ptr_to_string(info.category)
+                        .unwrap_or("".to_string()),
+                    language: self.from_code(
+                        self.sword_ptr_to_string(info.language)
+                            .unwrap_or("".to_string())
+                            .as_str(),
+                    ),
                     source: "Local".to_string(),
-                    version: self.sword_ptr_to_string(info.version).unwrap_or("".to_string()),
-                    delta: self.sword_ptr_to_string(info.delta).unwrap_or("".to_string()),
-                    cipher_key: self.sword_ptr_to_string(info.cipherKey).unwrap_or("".to_string()),
-                    features: features_vec, // Assign the Vec<String> here
+                    version: self
+                        .sword_ptr_to_string(info.version)
+                        .unwrap_or("".to_string()),
+                    delta: self
+                        .sword_ptr_to_string(info.delta)
+                        .unwrap_or("".to_string()),
+                    cipher_key: self
+                        .sword_ptr_to_string(info.cipherKey)
+                        .unwrap_or("".to_string()),
+                    features: features_vec,
                     signature_color: ModuleColor::generate(&color_hash),
                 });
 
                 ptr = ptr.offset(1);
             }
         }
-
-        //println!("[ModuleEngine] Local modules found: {:?}", modules);
         modules
     }
 
@@ -269,9 +280,7 @@ impl ModuleEngine {
             debug!("[ModuleEngine] Uninstall result: {}", res);
 
             if res == 0 {
-                info!(
-                    "[ModuleEngine] Uninstallation successful, refreshing main engine awareness"
-                );
+                info!("[ModuleEngine] Uninstallation successful, refreshing main engine awareness");
                 self.rebuild_mgr(&mut inner);
             }
 
@@ -385,7 +394,19 @@ impl ModuleEngine {
 
         // CRITICAL: Create the specific folder the InstallMgr uses for Remote Sources
         // If this isn't here, the 'syncConfig' download has nowhere to land.
-        let sources = ["Bible.org", "CrossWire", "CrossWire Attic", "CrossWire Beta", "CrossWire Wycliffe", "Deutsche Bibelgesellschaft", "IBT", "Lockman Foundation", "STEP Bible", "Xiphos", "eBible.org"];
+        let sources = [
+            "Bible.org",
+            "CrossWire",
+            "CrossWire Attic",
+            "CrossWire Beta",
+            "CrossWire Wycliffe",
+            "Deutsche Bibelgesellschaft",
+            "IBT",
+            "Lockman Foundation",
+            "STEP Bible",
+            "Xiphos",
+            "eBible.org",
+        ];
         for source in &sources {
             let remote_sources = path.join("InstallMgr").join("RemoteSources").join(source);
             let _ = fs::create_dir_all(&remote_sources);
