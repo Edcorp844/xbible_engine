@@ -1,62 +1,49 @@
 use log::info;
-use xbible_engine::engines::{module_engine::module_engine_extensions::module_engine_lexicon_ext::LexiconQuery, xbible_engine::engine::XBibleEngine};
+use xbible_engine::engines::xbible_engine::engine::XBibleEngine;
 
 fn main() {
     xbible_engine::init_logging();
     let engine = XBibleEngine::new();
 
-    let greek_query = "G3056"; // Example Strong's number for "agape" (love) in Greek
-    let language = "Greek";
+    info!("[Test] Fetching Bible modules...");
+    let bible_modules = engine.get_bible_modules();
+    info!("[Test] Found {} Bible module(s)", bible_modules.len());
 
-    let hebrew_query = "H2617"; // Example Strong's number for "hesed" (loving-kindness) in Hebrew
-    let language_hebrew = "Hebrew";
-
-    let dict_modules = engine.get_dictionary_modules();
-    info!("Available dictionary modules:");
-    for module in &dict_modules {
-        info!(" - {} (Language: {})", module.name, module.language);
-    }
-    
-    let lexicon_query = LexiconQuery {
-        strongs_number: greek_query.to_string(),  
-        language: language.to_string(),
+    let Some(first_module) = bible_modules.first() else {
+        info!("[Test] No Bible modules installed!");
+        return;
     };
 
-    let hebrew_lexicon_query = LexiconQuery {
-        strongs_number: hebrew_query.to_string(),
-        language: language_hebrew.to_string(),
+    info!("[Test] Using first module: {}", first_module.name);
+
+    info!("[Test] Fetching books for module '{}'...", first_module.name);
+    let books = engine.get_books(&first_module.name);
+    info!("[Test] Found {} book(s)", books.len());
+
+    let Some(first_book) = books.first() else {
+        info!("[Test] Module '{}' has no books available!", first_module.name);
+        return;
     };
 
-    let response = engine.lookup_strongs_number(lexicon_query);
+    info!("[Test] Using first book: {}", first_book.name);
 
-    info!("Lexicon results for {}: {} total results", greek_query, response.results.len());
-    for result in &response.results {
-        info!("  - Module: {}, Key: {}", result.module_name, result.key);
-    }
-    
-    // Also test H5501 which we know works
-    let hebrew_test = LexiconQuery {
-        strongs_number: "H5501".to_string(),
-        language: "Hebrew".to_string(),
-    };
-    let hebrew_resp = engine.lookup_strongs_number(hebrew_test);
-    info!("\nLexicon results for H5501 (Hebrew): {} total results", hebrew_resp.results.len());
-    for result in &hebrew_resp.results {
-        info!("  - Module: {}, Key: {}", result.module_name, result.key);
-    }
-    
-    // Test without language
-    let hebrew_test2 = LexiconQuery {
-        strongs_number: "H5501".to_string(),
-        language: "".to_string(),
-    };
-    let hebrew_resp2 = engine.lookup_strongs_number(hebrew_test2);
-    info!("\nLexicon results for H5501 (no language): {} total results", hebrew_resp2.results.len());
-    for result in &hebrew_resp2.results {
-        info!("  - Module: {}, Key: {}", result.module_name, result.key);
-    }
+    let first_chapter_num = first_book
+        .chapters
+        .first()
+        .map(|c| c.number)
+        .unwrap_or(1);
 
-    let hebrew_response = engine.lookup_strongs_number(hebrew_lexicon_query);
+    let reference = format!("{} {}", first_book.name, first_chapter_num);
+    info!("[Test] Querying chapter sections for reference: '{}'...", reference);
 
-    info!("Lexicon results for {}: {:?}", hebrew_query, hebrew_response);
+    let sections = engine.get_chapter_content(&first_module.name, &reference);
+    info!(
+        "[Test] Successfully retrieved {} section(s) for '{}'",
+        sections.len(),
+        reference
+    );
+
+    for (idx, section) in sections.iter().enumerate() {
+        info!("[Test] Section #{}: {:?}", idx + 1, section);
+    }
 }

@@ -134,6 +134,11 @@ impl ModuleEngine {
     pub fn get_whole_chapter(&self, module: &SwordModule, reference: &str) -> Vec<Section> {
         let mut raw_entries = Vec::new();
 
+        // 1. Move set_global_options OUTSIDE or pass inner explicitly to avoid re-locking self.inner
+        let options = ["Headings"];
+        unsafe { self.set_global_options(&options, "On") };
+
+        // 2. Acquire lock once for the module operations
         let inner = self.inner.lock().unwrap();
         let mod_name = CString::new(module.name.as_str()).unwrap();
         let h_mod =
@@ -144,9 +149,6 @@ impl ModuleEngine {
             return Vec::new();
         }
 
-        let options = ["Headings"];
-        unsafe { self.set_global_options(&options, "On") };
-
         let c_ref = CString::new(reference).unwrap();
         unsafe { org_crosswire_sword_SWModule_setKeyText(h_mod, c_ref.as_ptr()) };
 
@@ -156,16 +158,22 @@ impl ModuleEngine {
 
         let (target_book, target_chapter) = match self.parse_reference(&initial_key) {
             Some(val) => val,
-            None => return Vec::new(),
+            None => {
+                error!(
+                    "[SWORD ERROR]: Failed to parse initial key '{}'",
+                    initial_key
+                );
+                return Vec::new();
+            }
         };
 
         info!(
-            "\n--- [DUMPING RAW OSIS FOR {} {}] ---",
+            "[SWORD] Target book: '{}', Target chapter: '{}'",
             target_book, target_chapter
         );
 
+        // Explicitly navigate to Verse 1
         let v1_key = format!("{} {}:1", target_book, target_chapter);
-
         let c_v1 = CString::new(v1_key.as_str()).unwrap();
         unsafe { org_crosswire_sword_SWModule_setKeyText(h_mod, c_v1.as_ptr()) };
 
@@ -180,13 +188,16 @@ impl ModuleEngine {
             };
 
             if curr_book != target_book || curr_chap != target_chapter {
+                debug!(
+                    "[SWORD] Reached chapter boundary: '{} {}' (Expected '{} {}')",
+                    curr_book, curr_chap, target_book, target_chapter
+                );
                 break;
             }
 
             if let Some(raw_xml) =
                 unsafe { self.sword_ptr_to_string(org_crosswire_sword_SWModule_getRawEntry(h_mod)) }
             {
-                info!("[KEY: {}] RAW OSIS: {}", current_key, raw_xml);
                 raw_entries.push((current_key, raw_xml));
             }
 
@@ -196,18 +207,32 @@ impl ModuleEngine {
             }
         }
 
+        info!(
+            "[SWORD] Collected {} raw OSIS entries for '{}'",
+            raw_entries.len(),
+            reference
+        );
+
         let engine = OsisTransilationEngine::new();
         engine.parse_osis_list_to_sections(module.language.clone(), raw_entries)
     }
 
     fn parse_reference(&self, full_key: &str) -> Option<(String, String)> {
-        let last_space_idx = full_key.rfind(' ')?;
-        let book = full_key[..last_space_idx].to_lowercase();
-        let rest = &full_key[last_space_idx + 1..];
-        let chapter = match rest.find(':') {
-            Some(idx) => &rest[..idx],
-            None => rest,
-        };
-        Some((book, chapter.to_string()))
+        let full_key = full_key.trim();
+
+        // Check if the key contains a verse colon (e.g., "Song of Solomon 8:1")
+        if let Some(colon_idx) = full_key.rfind(':') {
+            let before_colon = &full_key[..colon_idx]; // "Song of Solomon 8"
+            let space_idx = before_colon.rfind(' ')?;
+            let book = before_colon[..space_idx].trim().to_lowercase();
+            let chapter = before_colon[space_idx + 1..].trim().to_string();
+            Some((book, chapter))
+        } else {
+            // Key is just Book and Chapter (e.g., "Song of Solomon 8" or "Genesis 1")
+            let space_idx = full_key.rfind(' ')?;
+            let book = full_key[..space_idx].trim().to_lowercase();
+            let chapter = full_key[space_idx + 1..].trim().to_string();
+            Some((book, chapter))
+        }
     }
 }
