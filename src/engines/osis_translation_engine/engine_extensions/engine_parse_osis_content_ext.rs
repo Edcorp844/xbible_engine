@@ -1,10 +1,12 @@
 use roxmltree::Node;
 
-use crate::engines::{ module_engine::module_engine_extensions::module_engine_module_content_ext::{LexicalInfo, Word}, osis_translation_engine::engine::OsisTransilationEngine};
+use crate::engines::{
+    module_engine::module_engine_extensions::module_engine_module_content_ext::{LexicalInfo, Word},
+    osis_translation_engine::engine::OsisTransilationEngine,
+};
 
-
-impl OsisTransilationEngine{
-      pub(crate) fn parse_osis_content(
+impl OsisTransilationEngine {
+    pub(crate) fn parse_osis_content(
         &self,
         language: &str,
         root: Node,
@@ -28,11 +30,18 @@ impl OsisTransilationEngine{
             language,
         );
 
+        // Compute contiguous group and added-word boundaries
+        self.mark_group_boundaries(&mut words);
+        if !title_words.is_empty() {
+            self.mark_group_boundaries(&mut title_words);
+        }
+
         let final_title = if title_words.is_empty() {
             None
         } else {
             Some(title_words)
         };
+
         (words, verse_notes, final_title)
     }
 
@@ -58,39 +67,120 @@ impl OsisTransilationEngine{
             let mut active_italic = is_italic;
             let mut active_divine = is_divine;
             let mut traversing_title = is_inside_title;
-            let mut _traversing_note = is_inside_note;
 
+            // 1. Tag Parsing & State Extraction
             if node.has_tag_name("title") {
                 traversing_title = true;
             } else if node.has_tag_name("w") {
-                if let Some(raw_lemma) = node.attribute("lemma") {
+                let raw_lemma = node.attribute("lemma").unwrap_or("");
+                let raw_morph = node.attribute("morph").unwrap_or("");
+                let raw_gloss = node.attribute("gloss").map(|g| g.to_string());
+
+                // Parse Strong's numbers
+                let strongs: Vec<String> = raw_lemma
+                    .split_whitespace()
+                    .filter(|s| s.starts_with("strong:"))
+                    .map(|s| s.trim_start_matches("strong:").to_string())
+                    .collect();
+
+                // Extract clean textual lemma if present
+                let clean_lemma = if !raw_lemma.is_empty() {
+                    let non_strong: Vec<&str> = raw_lemma
+                        .split_whitespace()
+                        .filter(|s| !s.starts_with("strong:"))
+                        .collect();
+                    if !non_strong.is_empty() {
+                        Some(non_strong.join(" "))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // Parse morphology tags into Vec<String>
+                let morph: Vec<String> = raw_morph
+                    .split_whitespace()
+                    .map(|m| {
+                        m.trim_start_matches("robinson:")
+                            .trim_start_matches("packard:")
+                            .trim_start_matches("strongMorph:")
+                            .to_string()
+                    })
+                    .filter(|m| !m.is_empty())
+                    .collect();
+
+                if !strongs.is_empty()
+                    || clean_lemma.is_some()
+                    || raw_gloss.is_some()
+                    || !morph.is_empty()
+                {
                     active_lex_owned = Some(LexicalInfo {
-                        strongs: raw_lemma
-                            .split_whitespace()
-                            .filter(|s| s.starts_with("strong:"))
-                            .map(|s| s.trim_start_matches("strong:").to_string())
-                            .collect(),
-                        ..Default::default()
+                        strongs,
+                        lemma: clean_lemma,
+                        gloss: raw_gloss,
+                        morph,
                     });
                 }
             } else if node.has_tag_name("divineName") {
                 active_divine = true;
-            } else if node.has_tag_name("q") && node.attribute("who") == Some("Jesus") {
-                active_red = true;
-            } else if node.has_tag_name("transChange") && node.attribute("type") == Some("added") {
-                active_added = true;
-            } else if node.has_tag_name("hi") && node.attribute("type") == Some("italic") {
-                active_italic = true;
+            } else if node.has_tag_name("q") {
+                if node.attribute("who") == Some("Jesus")
+                    || node.attribute("marker") == Some("red")
+                {
+                    active_red = true;
+                }
+            } else if node.has_tag_name("transChange") {
+                if node.attribute("type") == Some("added") || node.attribute("type").is_none() {
+                    active_added = true;
+                }
+            } else if node.has_tag_name("hi") {
+                let hi_type = node.attribute("type").unwrap_or("");
+                if hi_type == "italic" || hi_type == "oblique" {
+                    active_italic = true;
+                }
             } else if node.has_tag_name("note") {
-                _traversing_note = true;
-                let text = self.collect_note_text(node);
-                if !text.is_empty() {
-                    verse_notes.push(text);
+                let note_type = node.attribute("type").unwrap_or("explanation");
+                let note_text = self.collect_note_text(node);
+
+                if !note_text.is_empty() {
+                    let formatted_note = if note_type != "explanation" {
+                        format!("[{}] {}", note_type, note_text)
+                    } else {
+                        note_text
+                    };
+
+                    let target_vec = if traversing_title {
+                        &mut *title_accumulator
+                    } else {
+                        &mut *words
+                    };
+
+                    // Check if note lives inside <w> or directly follows parsed words
+                    let is_inside_w = node.ancestors().any(|a| a.has_tag_name("w"));
+                    if is_inside_w || !target_vec.is_empty() {
+                        if let Some(last_word) = target_vec.last_mut() {
+                            match &mut last_word.note {
+                                Some(existing) => {
+                                    existing.push_str("\n");
+                                    existing.push_str(&formatted_note);
+                                }
+                                None => {
+                                    last_word.note = Some(formatted_note);
+                                }
+                            }
+                            return;
+                        }
+                    }
+
+                    // Fallback to verse-level note if standalone
+                    verse_notes.push(formatted_note);
                 }
                 return;
             }
 
             let lex_to_pass = active_lex_owned.as_ref().or(parent_lex);
+
             for child in node.children() {
                 self.walk_osis(
                     child,
@@ -102,7 +192,7 @@ impl OsisTransilationEngine{
                     active_added,
                     active_italic,
                     traversing_title,
-                    _traversing_note,
+                    is_inside_note,
                     active_divine,
                     language,
                 );
@@ -111,8 +201,9 @@ impl OsisTransilationEngine{
             if is_inside_note {
                 return;
             }
-            let text = node.text().unwrap_or("").trim();
-            if text.is_empty() {
+
+            let raw_text = node.text().unwrap_or("");
+            if raw_text.trim().is_empty() {
                 return;
             }
 
@@ -122,8 +213,8 @@ impl OsisTransilationEngine{
                 words
             };
 
-            if self.is_non_segmented(text) {
-                for c in text.chars().filter(|c| !c.is_whitespace()) {
+            if self.is_non_segmented(raw_text) {
+                for c in raw_text.chars().filter(|c| !c.is_whitespace()) {
                     target_vec.push(self.create_word(
                         c.to_string(),
                         is_added,
@@ -136,7 +227,7 @@ impl OsisTransilationEngine{
                     ));
                 }
             } else {
-                for piece in text.split_whitespace() {
+                for piece in raw_text.split_whitespace() {
                     target_vec.push(self.create_word(
                         piece.to_string(),
                         is_added,
@@ -169,4 +260,37 @@ impl OsisTransilationEngine{
         }
     }
 
+ 
+
+    fn mark_group_boundaries(&self, words: &mut [Word]) {
+        let len = words.len();
+        if len == 0 {
+            return;
+        }
+
+        for i in 0..len {
+            if words[i].is_added {
+                words[i].is_first_added = i == 0 || !words[i - 1].is_added;
+                words[i].is_last_added = i == len - 1 || !words[i + 1].is_added;
+            } else {
+                words[i].is_first_added = false;
+                words[i].is_last_added = false;
+            }
+
+            let prev_same = i > 0
+                && words[i - 1].is_red == words[i].is_red
+                && words[i - 1].is_italic == words[i].is_italic
+                && words[i - 1].is_added == words[i].is_added
+                && words[i - 1].is_title == words[i].is_title;
+
+            let next_same = i < len - 1
+                && words[i + 1].is_red == words[i].is_red
+                && words[i + 1].is_italic == words[i].is_italic
+                && words[i + 1].is_added == words[i].is_added
+                && words[i + 1].is_title == words[i].is_title;
+
+            words[i].is_first_in_group = !prev_same;
+            words[i].is_last_in_group = !next_same;
+        }
+    }
 }
