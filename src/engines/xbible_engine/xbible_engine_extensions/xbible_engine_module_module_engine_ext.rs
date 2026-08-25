@@ -3,13 +3,9 @@ use std::{thread, time::Duration};
 use crate::engines::{
     module_engine::{
         module_engine_extensions::{
-            module_engine_dictionary_ext::{DictionaryQuery, DictionaryResponse},
-            module_engine_lexicon_ext::{LexiconQuery, LexiconResponse},
-            module_engine_module_content_ext::Section,
-        },
-        sword_module::{module::SwordModule, module_book::ModuleBook},
-    },
-    xbible_engine::{
+            module_engine_dictionary_ext::{DictionaryQuery, DictionaryResponse}, module_engine_lexicon_ext::{LexiconQuery, LexiconResponse}, module_engine_module_content_ext::Section, module_engine_search_ext::{SearchResults, SearchType},
+        }, sword_module::{module::SwordModule, module_book::ModuleBook},
+    }, xbible_engine::{
         engine::XBibleEngine,
         xbible_engine_extensions::xbible_engine_task_ext::{TaskData, TaskState, TaskStatus},
     },
@@ -22,7 +18,6 @@ pub struct ModuleSource {
     pub description: String, // e.g., "Official SWORD Project Repository"
     pub url: String,         // Source URL
 }
-
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct EngineGlobalOption {
@@ -491,7 +486,17 @@ impl XBibleEngine {
     }
 
     /// Get a single module entry by name
-    pub fn get_single_entry(&self, sword_module: &SwordModule, reference: &str) -> Vec<Section>{
-        self.module_engine.get_single_entry(Some(sword_module), reference)
+    pub fn get_single_entry(&self, sword_module: &SwordModule, reference: &str) -> Vec<Section> {
+        self.module_engine
+            .get_single_entry(Some(sword_module), reference)
+    }
+
+    pub fn search(
+        &self,
+        module_name: String,
+        query: String,
+        search_type: SearchType,
+    ) -> SearchResults {
+        self.module_engine.search(module_name, query, search_type)
     }
 }
