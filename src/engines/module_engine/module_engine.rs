@@ -82,26 +82,43 @@ impl ModuleEngine {
     }
 
     pub unsafe fn rebuild_mgr(&self, inner: &mut SwordInner) {
-        debug!("[ModuleEngine] Rebuilding SWMgr...");
-        unsafe { org_crosswire_sword_SWMgr_delete(inner.mgr) };
+       debug!("[ModuleEngine] Rebuilding SWMgr...");
 
         let path_str = self.sword_path.to_string_lossy().replace("\\", "/");
         let c_path = CString::new(path_str).unwrap();
 
-        inner.mgr = unsafe { org_crosswire_sword_SWMgr_newWithPath(c_path.as_ptr()) };
+        // 1. Allocate & scan directory tree OFF the Mutex lock
+        let new_mgr = unsafe { org_crosswire_sword_SWMgr_newWithPath(c_path.as_ptr()) };
+        if new_mgr == 0 {
+            error!("[ModuleEngine] Failed to construct new SWMgr");
+            return;
+        }
 
+        // Configure global settings on the new handle before swapping
         unsafe {
-            self.set_global_options(&["UTF8"], "true");
-        };
+            self.set_global_options_on_mgr(new_mgr, &["UTF8"], "true");
+        }
 
-        // Also sync the InstallMgr config to refresh local module detection
-        unsafe {
-            org_crosswire_sword_InstallMgr_syncConfig(inner.install_mgr);
-        };
+        // 2. Swap handles instantly inside inner
+        let old_mgr = inner.mgr;
+        inner.mgr = new_mgr;
+
+        // Sync InstallMgr config to recognize newly added modules
+        if inner.install_mgr != 0 {
+            unsafe {
+                org_crosswire_sword_InstallMgr_syncConfig(inner.install_mgr);
+            }
+        }
+
+        // 3. Delete old handle
+        if old_mgr != 0 {
+            unsafe {
+                org_crosswire_sword_SWMgr_delete(old_mgr);
+            }
+        }
 
         debug!("[ModuleEngine] SWMgr rebuilt successfully");
     }
-
     // ------------------- LOCAL MODULES -------------------
 
     pub fn get_modules(&self) -> Vec<SwordModule> {
