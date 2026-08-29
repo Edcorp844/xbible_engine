@@ -1,7 +1,9 @@
 use roxmltree::Node;
 
 use crate::engines::{
-    module_engine::module_engine_extensions::module_engine_module_content_ext::{LexicalInfo, Word},
+    module_engine::module_engine_extensions::module_engine_module_content_ext::{
+        LexicalInfo, Note, Word,
+    },
     osis_translation_engine::engine::OsisTransilationEngine,
 };
 
@@ -10,7 +12,7 @@ impl OsisTransilationEngine {
         &self,
         language: &str,
         root: Node,
-    ) -> (Vec<Word>, Vec<String>, Option<Vec<Word>>) {
+    ) -> (Vec<Word>, Vec<Note>, Option<Vec<Word>>) {
         let mut words = Vec::with_capacity(64);
         let mut verse_notes = Vec::new();
         let mut title_words = Vec::new();
@@ -49,7 +51,7 @@ impl OsisTransilationEngine {
         &self,
         node: Node,
         words: &mut Vec<Word>,
-        verse_notes: &mut Vec<String>,
+        verse_notes: &mut Vec<Note>,
         title_accumulator: &mut Vec<Word>,
         parent_lex: Option<&LexicalInfo>,
         is_red: bool,
@@ -140,41 +142,73 @@ impl OsisTransilationEngine {
                     active_italic = true;
                 }
             } else if node.has_tag_name("note") {
-                let note_type = node.attribute("type").unwrap_or("explanation");
+                let note_type = node
+                    .attribute("type")
+                    .unwrap_or("explanation")
+                    .to_string();
+                let note_n = node.attribute("n").map(|n| n.to_string());
+
+                // Extract internal reference target if present
+                let osis_ref = node
+                    .descendants()
+                    .find(|d| d.has_tag_name("reference"))
+                    .and_then(|r| r.attribute("osisRef"))
+                    .map(|r| r.to_string());
+
                 let note_text = self.collect_note_text(node);
 
                 if !note_text.is_empty() {
-                    let formatted_note = if note_type != "explanation" {
-                        format!("[{}] {}", note_type, note_text)
+                    let formatted_note_text = if let Some(ref ref_target) = osis_ref {
+                        if !note_text.contains(ref_target) {
+                            format!("{} [{}]", note_text, ref_target)
+                        } else {
+                            note_text.clone()
+                        }
                     } else {
-                        note_text
+                        note_text.clone()
                     };
 
-                    let target_vec = if traversing_title {
-                        &mut *title_accumulator
-                    } else {
-                        &mut *words
-                    };
-
-                    // Check if note lives inside <w> or directly follows parsed words
                     let is_inside_w = node.ancestors().any(|a| a.has_tag_name("w"));
-                    if is_inside_w || !target_vec.is_empty() {
-                        if let Some(last_word) = target_vec.last_mut() {
-                            match &mut last_word.note {
-                                Some(existing) => {
-                                    existing.push_str("\n");
-                                    existing.push_str(&formatted_note);
+
+                    // Determine if this is a section/title note
+                    let is_section = traversing_title
+                        || node.ancestors().any(|a| a.has_tag_name("title"));
+
+                    let note_struct = Note {
+                        note_type: note_type.clone(),
+                        n: note_n.clone(),
+                        osis_ref,
+                        text: formatted_note_text.clone(),
+                        is_section_note: is_section,
+                    };
+
+                    // Attach to word ONLY if it is an inline word note inside verse body
+                    if !is_section {
+                        let target_vec = &mut *words;
+                        if is_inside_w || !target_vec.is_empty() {
+                            if let Some(last_word) = target_vec.last_mut() {
+                                let word_note_entry = if note_type != "explanation" {
+                                    format!("[{}] {}", note_type, formatted_note_text)
+                                } else {
+                                    formatted_note_text
+                                };
+
+                                match &mut last_word.note {
+                                    Some(existing) => {
+                                        existing.push_str("\n");
+                                        existing.push_str(&word_note_entry);
+                                    }
+                                    None => {
+                                        last_word.note = Some(word_note_entry);
+                                    }
                                 }
-                                None => {
-                                    last_word.note = Some(formatted_note);
-                                }
+                                return;
                             }
-                            return;
                         }
                     }
 
-                    // Fallback to verse-level note if standalone
-                    verse_notes.push(formatted_note);
+                    // Store Section Notes and Standalone Verse Notes in verse_notes
+                    verse_notes.push(note_struct);
                 }
                 return;
             }
@@ -259,8 +293,6 @@ impl OsisTransilationEngine {
             }
         }
     }
-
- 
 
     fn mark_group_boundaries(&self, words: &mut [Word]) {
         let len = words.len();

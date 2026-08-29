@@ -3,9 +3,15 @@ use std::{thread, time::Duration};
 use crate::engines::{
     module_engine::{
         module_engine_extensions::{
-            module_engine_dictionary_ext::{DictionaryQuery, DictionaryResponse}, module_engine_lexicon_ext::{LexiconQuery, LexiconResponse}, module_engine_module_content_ext::Section, module_engine_search_ext::{SearchResults, SearchType},
-        }, sword_module::{module::SwordModule, module_book::ModuleBook},
-    }, xbible_engine::{
+            module_engine_dictionary_ext::{DictionaryQuery, DictionaryResponse},
+            module_engine_genaralbook_content_ext::TreeNode,
+            module_engine_lexicon_ext::{LexiconQuery, LexiconResponse},
+            module_engine_module_content_ext::Section,
+            module_engine_search_ext::{SearchResults, SearchType},
+        },
+        sword_module::{module::SwordModule, module_book::ModuleBook},
+    },
+    xbible_engine::{
         engine::XBibleEngine,
         xbible_engine_extensions::xbible_engine_task_ext::{TaskData, TaskState, TaskStatus},
     },
@@ -491,6 +497,7 @@ impl XBibleEngine {
             .get_single_entry(Some(sword_module), reference)
     }
 
+    /// Search word from a bibble text module
     pub fn search(
         &self,
         module_name: String,
@@ -498,5 +505,20 @@ impl XBibleEngine {
         search_type: SearchType,
     ) -> SearchResults {
         self.module_engine.search(module_name, query, search_type)
+    }
+
+    /// Get tree structure of a general book module
+    pub fn get_general_book_structure(&self, book_module: &SwordModule) -> TreeNode {
+        self.module_engine.get_general_book_structure(book_module)
+    }
+
+    //gets general book content
+    pub fn get_genearl_book_content(
+        &self,
+        book_module: &SwordModule,
+        node: TreeNode,
+    ) -> Vec<Section> {
+        self.module_engine
+            .get_genearl_book_content(book_module, node)
     }
 }

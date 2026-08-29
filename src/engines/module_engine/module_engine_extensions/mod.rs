@@ -6,3 +6,4 @@ pub mod module_engine_module_content_ext;
 pub mod module_engine_util_ext;
 pub mod module_engine_remote_modules_ext;
 pub mod module_engine_search_ext;
+pub mod module_engine_genaralbook_content_ext;

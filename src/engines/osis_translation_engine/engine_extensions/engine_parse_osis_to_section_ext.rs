@@ -1,7 +1,9 @@
 use roxmltree::Document;
 
 use crate::engines::{
-    module_engine::module_engine_extensions::module_engine_module_content_ext::{Section, Verse},
+    module_engine::module_engine_extensions::module_engine_module_content_ext::{
+        Note, Section, Verse,
+    },
     osis_translation_engine::engine::OsisTransilationEngine,
 };
 
@@ -28,15 +30,18 @@ impl OsisTransilationEngine {
 
             self.apply_group_metadata(&mut words);
 
+            // Separate Section-level notes from Verse-level notes
+            let (section_notes, verse_notes): (Vec<Note>, Vec<Note>) =
+                notes.into_iter().partition(|n| n.is_section_note);
+
             let verse = Verse {
                 number: self.extract_verse_number(&key),
                 osis_id: key.clone(),
                 words,
-                notes,
+                notes: verse_notes, // Only attach verse-specific notes here
                 is_paragraph_start: osis.contains("type=\"paragraph\"") || key.ends_with(":1"),
             };
 
-            // --- THE CORE FIX ---
             // If we have a title, we MUST start a new section.
             if let Some(mut t_words) = title_words {
                 self.apply_group_metadata(&mut t_words);
@@ -45,18 +50,22 @@ impl OsisTransilationEngine {
                 sections.push(Section {
                     title: t_words,
                     verses: vec![verse],
+                    notes: section_notes, // Section header notes attached here
                     text_direction,
                 });
             } else {
                 // If there is NO title, try to append to the existing last section.
                 if let Some(last_section) = sections.last_mut() {
                     last_section.verses.push(verse);
+                    // Extend section notes if any exist in subsequent fragments under the same section
+                    last_section.notes.extend(section_notes);
                 } else {
                     // No sections exist yet (e.g. Verse 1 has no title), create the first one.
                     let text_direction = self.detect_direction(&verse);
                     sections.push(Section {
                         title: Vec::new(),
                         verses: vec![verse],
+                        notes: section_notes,
                         text_direction,
                     });
                 }

@@ -8,7 +8,7 @@ use std::ffi::CString;
 
 // --- DATA STRUCTURES ---
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, uniffi::Record)]
 pub struct LexicalInfo {
     pub strongs: Vec<String>,
     pub lemma: Option<String>,
@@ -16,7 +16,16 @@ pub struct LexicalInfo {
     pub morph: Vec<String>,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, uniffi::Record)]
+pub struct Note {
+    pub note_type: String, // e.g., "x-footnote", "crossReference", "explanation"
+    pub n: Option<String>, // Marker/number attribute (e.g., n="1")
+    pub osis_ref: Option<String>, // Cross-reference target (e.g., osisRef="Gen.1.2")
+    pub text: String,      // Cleaned note content text
+    pub is_section_note: bool, // True if note belongs to section/title (e.g. Enoch 108 header note)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct Word {
     pub text: String,
     pub is_red: bool,
@@ -55,25 +64,26 @@ impl Default for Word {
     }
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct Verse {
     pub osis_id: String,
     pub number: i32,
     pub words: Vec<Word>,
-    pub notes: Vec<String>,
+    pub notes: Vec<Note>,
     pub is_paragraph_start: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum TextDirection {
     Rtl,
     Ltr,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct Section {
     pub title: Vec<Word>,
     pub verses: Vec<Verse>,
+    pub notes: Vec<Note>,
     pub text_direction: TextDirection,
 }
 
