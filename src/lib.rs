@@ -42,6 +42,14 @@ pub extern "C" fn init_logging() {
     log::info!("Initialized logging for XBibleEngine on {}", std::env::consts::OS);
 }
 
+/// Required when libbz2 is built with BZ_NO_STDIO (typical on iOS).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bz_internal_error(errcode: std::os::raw::c_int) {
+    // Avoid depending on stdio inside the bz2 library path.
+    error!("bzip2 internal error: {errcode}");
+    std::process::abort();
+}
+
 pub mod engines;
 pub mod runtime;
 pub mod data;
