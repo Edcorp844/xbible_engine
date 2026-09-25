@@ -44,7 +44,10 @@ fn patch_sword_cmakelists(sword_src: &Path, target_os: &str, sdk_include_path: O
     if ftplib.exists() {
         if let Ok(mut src) = fs::read_to_string(&ftplib) {
             if !src.contains("#ifndef GLOBALREF") {
-                src.insert_str(0, "#ifndef GLOBALREF\n#define GLOBALREF extern\n#endif\n#ifndef GLOBALDEF\n#define GLOBALDEF\n#endif\n\n");
+                src.insert_str(
+                    0,
+                    "#ifndef GLOBALREF\n#define GLOBALREF extern\n#endif\n#ifndef GLOBALDEF\n#define GLOBALDEF\n#endif\n\n",
+                );
                 let _ = fs::write(&ftplib, src);
             }
         }
@@ -151,6 +154,7 @@ fn main() {
     // iOS SDK detection flags
     let mut sdk_inc_path: Option<String> = None;
     let mut sdk_name_flag: Option<String> = None;
+    let mut ios_sdk_path: Option<String> = None; // full SDK path for bindgen
 
     if target_os == "ios" {
         let is_sim = target_triple.contains("sim") || target_triple.contains("ios-sim");
@@ -169,6 +173,8 @@ fn main() {
         let sdk_path_str = String::from_utf8_lossy(&sdk_output.stdout)
             .trim()
             .to_string();
+        ios_sdk_path = Some(sdk_path_str.clone());
+
         let sdk_usr = Path::new(&sdk_path_str).join("usr");
         sdk_inc_path = Some(sdk_usr.join("include").to_string_lossy().into_owned());
     }
@@ -209,9 +215,22 @@ fn main() {
 
     match target_os.as_str() {
         "ios" => {
-            let sdk_name = sdk_name_flag.unwrap();
-            let sdk_inc = sdk_inc_path.unwrap();
+            let sdk_name = sdk_name_flag.as_ref().unwrap();
+            let sdk_inc = sdk_inc_path.as_ref().unwrap();
             let is_simulator = target_triple.contains("sim") || target_triple.contains("ios-sim");
+
+            // Force Apple’s clang – never Homebrew LLVM
+            let cc = Command::new("xcrun")
+                .args(["--sdk", sdk_name, "--find", "clang"])
+                .output()
+                .expect("xcrun clang failed");
+            let cxx = Command::new("xcrun")
+                .args(["--sdk", sdk_name, "--find", "clang++"])
+                .output()
+                .expect("xcrun clang++ failed");
+
+            let cc = String::from_utf8_lossy(&cc.stdout).trim().to_string();
+            let cxx = String::from_utf8_lossy(&cxx.stdout).trim().to_string();
 
             // Explicit target alignment arguments passed directly to rustc compilation cycle
             if is_simulator {
@@ -223,15 +242,18 @@ fn main() {
             }
 
             cmake
-                .define("CMAKE_OSX_SYSROOT", sdk_name)
+                .define("CMAKE_C_COMPILER", &cc)
+                .define("CMAKE_CXX_COMPILER", &cxx)
+                .define("CMAKE_ASM_COMPILER", &cc)
+                .define("CMAKE_OSX_SYSROOT", sdk_name.as_str())
                 .define("CMAKE_SYSTEM_NAME", "iOS")
                 .define("CMAKE_OSX_ARCHITECTURES", arch)
                 .define("CMAKE_OSX_DEPLOYMENT_TARGET", "14.0")
                 .define("CURL_FOUND", "TRUE")
-                .define("CURL_INCLUDE_DIR", &sdk_inc)
-                .define("CURL_INCLUDE_DIRS", &sdk_inc)
+                .define("CURL_INCLUDE_DIR", sdk_inc.as_str())
+                .define("CURL_INCLUDE_DIRS", sdk_inc.as_str())
                 .define("CURL_LIBRARIES", "")
-                .define("CMAKE_INCLUDE_PATH", &sdk_inc);
+                .define("CMAKE_INCLUDE_PATH", sdk_inc.as_str());
         }
         "macos" => {
             cmake.define("CMAKE_OSX_ARCHITECTURES", arch);
@@ -301,12 +323,12 @@ fn main() {
         }
         "android" => {
             //println!("cargo:rustc-link-lib=dylib=curl");
-            cmake.define("SWORD_CURL", "OFF");
             println!("cargo:rustc-link-lib=dylib=z");
             println!("cargo:rustc-link-lib=dylib=c++_shared");
             println!("cargo:rustc-link-lib=dylib=log");
         }
         _ => {
+            // Linux / other Unix
             if let Ok(icu_uc) = pkg_config::Config::new().probe("icu-uc") {
                 if let Ok(icu_i18n) = pkg_config::Config::new().probe("icu-i18n") {
                     for lib_path in icu_uc.link_paths.iter().chain(icu_i18n.link_paths.iter()) {
@@ -339,25 +361,62 @@ fn main() {
         .rust_target(bindgen::RustTarget::stable(96, 0).unwrap())
         .wrap_unsafe_ops(true);
 
-    if target_os == "ios" || target_os == "macos" {
-        if let Ok(sdk) = env::var("SDKROOT") {
-            builder = builder.clang_arg(format!("--sysroot={}", sdk));
-        }
-    }
+    match target_os.as_str() {
+        "ios" => {
+            // Always resolve the real SDK path – never rely on the SDKROOT env var
+            let sdk_path = ios_sdk_path.expect("iOS SDK path should have been resolved");
+            let is_sim = target_triple.contains("sim") || target_triple.contains("ios-sim");
 
-    if target_os == "android" {
-        if let Ok(ndk) = env::var("ANDROID_NDK_HOME") {
-            let sysroot = Path::new(&ndk).join("toolchains/llvm/prebuilt/darwin-x86_64/sysroot");
-            let clang_target = if target_triple.contains("x86_64") {
-                "x86_64-linux-android24"
-            } else if target_triple.contains("aarch64") {
-                "aarch64-linux-android24"
+            let clang_target = if is_sim {
+                "arm64-apple-ios-simulator"
             } else {
-                "armv7a-linux-androideabi24"
+                "arm64-apple-ios"
             };
+
             builder = builder
                 .clang_arg(format!("--target={}", clang_target))
-                .clang_arg(format!("--sysroot={}", sysroot.display()));
+                .clang_arg(format!("-isysroot{}", sdk_path))
+                .clang_arg(format!("-I{}/usr/include", sdk_path));
+
+            if is_sim {
+                builder = builder.clang_arg("-mios-simulator-version-min=14.0");
+            } else {
+                builder = builder.clang_arg("-miphoneos-version-min=14.0");
+            }
+        }
+        "macos" => {
+            if let Ok(sdk) = env::var("SDKROOT") {
+                builder = builder.clang_arg(format!("--sysroot={}", sdk));
+            } else {
+                // fallback – keep macOS working even when SDKROOT is unset
+                let sdk_output = Command::new("xcrun")
+                    .args(["--sdk", "macosx", "--show-sdk-path"])
+                    .output()
+                    .expect("xcrun macosx failed");
+                let sdk_path = String::from_utf8_lossy(&sdk_output.stdout)
+                    .trim()
+                    .to_string();
+                builder = builder.clang_arg(format!("-isysroot{}", sdk_path));
+            }
+        }
+        "android" => {
+            if let Ok(ndk) = env::var("ANDROID_NDK_HOME") {
+                let sysroot = Path::new(&ndk)
+                    .join("toolchains/llvm/prebuilt/darwin-x86_64/sysroot");
+                let clang_target = if target_triple.contains("x86_64") {
+                    "x86_64-linux-android24"
+                } else if target_triple.contains("aarch64") {
+                    "aarch64-linux-android24"
+                } else {
+                    "armv7a-linux-androideabi24"
+                };
+                builder = builder
+                    .clang_arg(format!("--target={}", clang_target))
+                    .clang_arg(format!("--sysroot={}", sysroot.display()));
+            }
+        }
+        _ => {
+            // Linux / Windows – no extra clang args needed (previous behaviour)
         }
     }
 

@@ -398,6 +398,13 @@ impl ModuleEngine {
     // ------------------- HELPERS -------------------
 
     fn get_sword_path() -> PathBuf {
+        // First check for environment variable (set by Android app)
+        if let Ok(path_str) = std::env::var("SWORD_PATH") {
+            debug!("[ModuleEngine] Using SWORD_PATH from environment: {}", path_str);
+            return PathBuf::from(path_str);
+        }
+
+        // Fallback to project directories (macOS/Linux dev environment)
         let proj_dirs = ProjectDirs::from("org", "flame", "xbible").expect("Path error");
         let path = proj_dirs.data_local_dir().to_path_buf();
         fs::create_dir_all(&path).ok();
@@ -424,48 +431,68 @@ impl ModuleEngine {
             "Xiphos",
             "eBible.org",
         ];
+
+        let install_mgr_path = path.join("InstallMgr");
+        let _ = fs::create_dir_all(&install_mgr_path);
+
         for source in &sources {
-            let remote_sources = path.join("InstallMgr").join("RemoteSources").join(source);
+            let remote_sources = install_mgr_path.join("RemoteSources").join(source);
             let _ = fs::create_dir_all(&remote_sources);
         }
 
         let abs_path_str = path.to_string_lossy().replace("\\", "/");
-        let conf_path = path.join("sword.conf");
 
-        // Use the absolute path for DataPath.
-        // We remove the #[wrap] logic here as per your permanent fix requirements.
-        let config = format!(
+        // 1. Create sword.conf for the main SWMgr
+        let sword_conf_path = path.join("sword.conf");
+        let sword_config = format!(
             r#"[Globals]
 DataPath={}
 [Install]
 Disclaimer=Confirmed
+"#,
+            abs_path_str
+        );
+
+        if let Ok(mut file) = fs::File::create(sword_conf_path) {
+            let _ = writeln!(file, "{}", sword_config);
+        }
+
+        // 2. Create InstallMgr.conf for the InstallMgr
+        // This is CRITICAL for remote sources to show up without a successful initial syncConfig
+        let install_mgr_conf_path = path.join("InstallMgr.conf");
+        let install_config = format!(
+            r#"[General]
+Disclaimer=Confirmed
+
 [Repos]
 [Remote:CrossWire]
-Description=CrossWire HTTP
+Description=CrossWire Repository
 Protocol=HTTP
 Source=www.crosswire.org
 Directory=/ftpmirror/pub/sword/raw
+
 [Remote:Bible.org]
 Description=Bible.org Repository
 Protocol=HTTP
 Source=ftp.bible.org
 Directory=/sword
+
 [Remote:IBT]
 Description=Institute for Bible Translation
 Protocol=HTTP
 Source=ibt.org.ru
 Directory=/sword
+
 [Remote:ebible.org]
 Description=eBible.org Repository
 Protocol=HTTP
 Source=ebible.org
 Directory=/sword
 "#,
-            abs_path_str
         );
 
-        if let Ok(mut file) = fs::File::create(conf_path) {
-            let _ = writeln!(file, "{}", config);
+        if let Ok(mut file) = fs::File::create(install_mgr_conf_path) {
+            let _ = writeln!(file, "{}", install_config);
         }
     }
 }
