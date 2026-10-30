@@ -1,9 +1,12 @@
-use std::ffi::{CStr, CString};
-use std::sync::atomic::Ordering;
-use crate::engines::module_engine::module_engine::{ModuleEngine, PROGRESS_COMPLETED, PROGRESS_TOTAL};
+use crate::engines::module_engine::module_engine::{
+    ModuleEngine, PROGRESS_COMPLETED, PROGRESS_TOTAL,
+};
 use crate::engines::module_engine::sword_module::module::SwordModule;
 use crate::engines::module_engine::sword_module::module_color::ModuleColor;
 use crate::ffi::*;
+use std::ffi::{CStr, CString};
+use std::sync::atomic::Ordering;
+use std::sync::{Mutex, OnceLock};
 
 impl ModuleEngine {
     // ------------------- REMOTE SOURCES -------------------
@@ -19,7 +22,10 @@ impl ModuleEngine {
             if !ptr.is_null() {
                 let mut i = 0;
                 while !(*ptr.offset(i)).is_null() {
-                    sources.push(self.sword_ptr_to_string(*ptr.offset(i)).unwrap_or("Unknown".to_string()));
+                    sources.push(
+                        self.sword_ptr_to_string(*ptr.offset(i))
+                            .unwrap_or("Unknown".to_string()),
+                    );
                     i += 1;
                 }
             }
@@ -84,18 +90,36 @@ impl ModuleEngine {
 
                     let color_hash = format!(
                         "{}{}",
-                        self.sword_ptr_to_string((*entry).name).unwrap_or("Unknown".to_string()),
-                        self.sword_ptr_to_string((*entry).description).unwrap_or("Unknown".to_string())
+                        self.sword_ptr_to_string((*entry).name)
+                            .unwrap_or("Unknown".to_string()),
+                        self.sword_ptr_to_string((*entry).description)
+                            .unwrap_or("Unknown".to_string())
                     );
                     modules.push(SwordModule {
-                        name: self.sword_ptr_to_string((*entry).name).unwrap_or("Unknown".to_string()),
-                        description: self.sword_ptr_to_string((*entry).description).unwrap_or("Unknown".to_string()),
-                        category: self.sword_ptr_to_string((*entry).category).unwrap_or("Unknown".to_string()),
-                        language: self.from_code(self.sword_ptr_to_string((*entry).language).unwrap_or("Unknown".to_string()).as_str()),
+                        name: self
+                            .sword_ptr_to_string((*entry).name)
+                            .unwrap_or("Unknown".to_string()),
+                        description: self
+                            .sword_ptr_to_string((*entry).description)
+                            .unwrap_or("Unknown".to_string()),
+                        category: self
+                            .sword_ptr_to_string((*entry).category)
+                            .unwrap_or("Unknown".to_string()),
+                        language: self.from_code(
+                            self.sword_ptr_to_string((*entry).language)
+                                .unwrap_or("Unknown".to_string())
+                                .as_str(),
+                        ),
                         source: source_name.to_string(),
-                        version: self.sword_ptr_to_string((*entry).version).unwrap_or("Unknown".to_string()),
-                        delta: self.sword_ptr_to_string((*entry).delta).unwrap_or("Unknown".to_string()),
-                        cipher_key: self.sword_ptr_to_string((*entry).cipherKey).unwrap_or("Unknown".to_string()),
+                        version: self
+                            .sword_ptr_to_string((*entry).version)
+                            .unwrap_or("Unknown".to_string()),
+                        delta: self
+                            .sword_ptr_to_string((*entry).delta)
+                            .unwrap_or("Unknown".to_string()),
+                        cipher_key: self
+                            .sword_ptr_to_string((*entry).cipherKey)
+                            .unwrap_or("Unknown".to_string()),
                         features: features_vec,
                         signature_color: ModuleColor::generate(&color_hash),
                     });
@@ -151,9 +175,7 @@ impl ModuleEngine {
             org_crosswire_sword_InstallMgr_delete(local_install_mgr);
 
             if res == 0 {
-                debug!(
-                    "[ModuleEngine] Installation successful, refreshing main engine awareness"
-                );
+                debug!("[ModuleEngine] Installation successful, refreshing main engine awareness");
                 let mut inner = self.inner.lock().unwrap();
                 self.rebuild_mgr(&mut inner);
             }
@@ -173,5 +195,42 @@ impl ModuleEngine {
         } else {
             (completed as f64 / total as f64).clamp(0.0, 1.0)
         }
+    }
+
+    pub unsafe extern "C" fn status_reporter(
+        msg: *const ::std::os::raw::c_char,
+        total: ::std::os::raw::c_ulong,
+        completed: ::std::os::raw::c_ulong,
+    ) {
+        PROGRESS_TOTAL.store(total as u64, Ordering::SeqCst);
+        PROGRESS_COMPLETED.store(completed as u64, Ordering::SeqCst);
+
+        if !msg.is_null() {
+            let message = unsafe { CStr::from_ptr(msg).to_string_lossy() };
+
+            // Ignore the very frequent “update” noise
+            if !message.eq_ignore_ascii_case("update") && !message.trim().is_empty() {
+                info!("[SWORD] {}/{} – {}", completed, total, message);
+                Self::set_message(message.into_owned());
+            }
+        }
+    }
+
+    fn message_slot() -> &'static Mutex<String> {
+        static SLOT: OnceLock<Mutex<String>> = OnceLock::new();
+        SLOT.get_or_init(|| Mutex::new(String::new()))
+    }
+
+    pub fn set_message(message: impl Into<String>) {
+        if let Ok(mut g) = Self::message_slot().lock() {
+            *g = message.into();
+        }
+    }
+
+    pub fn get_message() -> String {
+        Self::message_slot()
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 }

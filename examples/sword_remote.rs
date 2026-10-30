@@ -1,5 +1,5 @@
 use log::{error, info};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -19,10 +19,12 @@ enum EngineStep {
     Finished,
 }
 
+#[derive(Clone, Debug)]
 struct InstallTracker {
     module_name: String,
     progress: f32,
-    status: String,
+    status: String,  // "Queued" | "downloading" | "extracting" | "complete" | "error"
+    message: String, // live text from SWORD, e.g. "Downloading nt.bzs"
 }
 
 struct AppState {
@@ -36,7 +38,6 @@ fn main() {
 
     xbible_engine::init_logging();
 
-    // Initialize the engine core safely
     let engine = Arc::new(XBibleEngine::new());
 
     let state = Arc::new(Mutex::new(AppState {
@@ -46,7 +47,7 @@ fn main() {
     }));
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  BACKGROUND WORKER MANAGING THREAD
+    //  BACKGROUND WORKER
     // ─────────────────────────────────────────────────────────────────────────
     let engine_worker = Arc::clone(&engine);
     let state_worker = Arc::clone(&state);
@@ -58,123 +59,145 @@ fn main() {
             }
         };
 
-        // 1. Fetch Remote Sources List (Local structural read)
+        // 1. Fetch Sources
         let sources = engine_worker.get_remote_sources();
         let total_sources = sources.len();
 
         if sources.is_empty() {
             set_step(EngineStep::Failed(
-                "No remote sources are configured in the engine context.".to_string(),
+                "No remote sources are configured.".to_string(),
             ));
             return;
         }
 
-        // Shared aggregators for concurrent network fetching tasks
-        let remote_modules_aggr = Arc::new(Mutex::new(Vec::new()));
-        let completed_sources = Arc::new(AtomicUsize::new(0));
-        let mut fetch_handles = vec![];
+        info!("📡 Found {} remote sources", total_sources);
 
-        // 2. Spawn Concurrency Workers to pull remote catalogs in parallel
-        for source in sources {
-            let engine_cp = Arc::clone(&engine_worker);
-            let modules_cp = Arc::clone(&remote_modules_aggr);
-            let completed_cp = Arc::clone(&completed_sources);
-            let state_cp = Arc::clone(&state_worker);
+        // 2. Fetch module catalogs SEQUENTIALLY (SWORD is not thread-safe)
+        let mut remote_modules = Vec::new();
 
-            // Adjust `.name` or formatting depending on what your Engine Source struct fields look like
+        for (idx, source) in sources.into_iter().enumerate() {
             let source_identifier = format!("{:?}", source);
 
-            let handle = thread::spawn(move || {
-                // Network network bound sync operation (Runs concurrently across cores)
-                let mut modules = engine_cp.fetch_remote_modules(&source);
+            // Update UI immediately so the monitor shows progress
+            if let Ok(mut s) = state_worker.lock() {
+                s.current_step = EngineStep::FetchingSources {
+                    current: idx + 1,
+                    total: total_sources,
+                    active_source: source_identifier.clone(),
+                };
+                s.global_progress = ((idx + 1) as f32) / (total_sources as f32);
+            }
 
-                if !modules.is_empty() {
-                    if let Ok(mut master_list) = modules_cp.lock() {
-                        master_list.append(&mut modules);
-                    }
-                }
+            info!("📡 Fetching modules from {} ...", source_identifier);
 
-                // Increment tracker safely using atomic hardware instructions
-                let finished = completed_cp.fetch_add(1, Ordering::SeqCst) + 1;
-
-                // Push dynamic diagnostic frame up to the UI thread
-                if let Ok(mut s) = state_cp.lock() {
-                    s.current_step = EngineStep::FetchingSources {
-                        current: finished,
-                        total: total_sources,
-                        active_source: source_identifier,
-                    };
-                    s.global_progress = (finished as f32) / (total_sources as f32);
-                }
-            });
-
-            fetch_handles.push(handle);
+            let mut modules = engine_worker.fetch_remote_modules(&source);
+            if !modules.is_empty() {
+                remote_modules.append(&mut modules);
+            }
         }
-
-        // Wait for all concurrent background connections to resolve completely
-        for handle in fetch_handles {
-            let _ = handle.join();
-        }
-
-        // Safely extract the compiled vector from the synchronization guard shell
-        let remote_modules = match Arc::try_unwrap(remote_modules_aggr) {
-            Ok(mutex) => mutex.into_inner().unwrap_or_default(),
-            Err(mutex) => mutex.lock().unwrap().clone(),
-        };
 
         if remote_modules.is_empty() {
             set_step(EngineStep::Failed(
-                "Network aggregation returned zero remote modules across all sources.".to_string(),
+                "Network aggregation returned zero remote modules.".to_string(),
             ));
             return;
         }
 
-        // 3. Selection Stage
-        set_step(EngineStep::ProcessingSelection);
-        thread::sleep(Duration::from_millis(600));
+        info!("📦 Aggregated {} remote modules", remote_modules.len());
 
-        let target_count = std::cmp::min(3, remote_modules.len());
-        let selected_modules: Vec<String> = remote_modules
+        // 3. Selection — ONE module
+        set_step(EngineStep::ProcessingSelection);
+        thread::sleep(Duration::from_millis(400));
+
+        let selected: Option<(String, String)> = remote_modules
             .iter()
-            .take(target_count)
-            .map(|m| m.name.clone())
-            .collect();
+            .filter(|m| !engine_worker.is_module_installed(&m.name))
+            .map(|m| (m.name.clone(), m.source.clone()))
+            .next();
+
+        let Some((module_name, module_source)) = selected else {
+            set_step(EngineStep::Failed(
+                "No uninstalled modules available to test. Delete one from ~/…/Modules first."
+                    .to_string(),
+            ));
+            return;
+        };
+
+        info!(
+            "🎯 Selected module to install: {} (source: {})",
+            module_name, module_source
+        );
 
         {
             if let Ok(mut s) = state_worker.lock() {
-                s.installers = selected_modules
-                    .iter()
-                    .map(|name| InstallTracker {
-                        module_name: name.clone(),
-                        progress: 0.0,
-                        status: "Queued".to_string(),
-                    })
-                    .collect();
+                s.installers = vec![InstallTracker {
+                    module_name: module_name.clone(),
+                    progress: 0.0,
+                    status: "Queued".to_string(),
+                    message: String::new(),
+                }];
                 s.current_step = EngineStep::InstallingModules;
             }
         }
 
-        // 4. Sequential Module Install Sequence
-        for i in 0..target_count {
-            {
-                if let Ok(mut s) = state_worker.lock() {
-                    s.installers[i].status = "Installing".to_string();
-                }
-            }
-
-            // Real execution binding placement hook:
-            // engine_worker.install_module(&selected_modules[i]);
-            for progress_tick in 1..=100 {
-                thread::sleep(Duration::from_millis(25));
-
-                if let Ok(mut s) = state_worker.lock() {
-                    s.installers[i].progress = progress_tick as f32 / 100.0;
-                }
-            }
-
+        // 4. REAL install
+        {
             if let Ok(mut s) = state_worker.lock() {
-                s.installers[i].status = "Completed".to_string();
-                s.installers[i].progress = 1.0;
+                s.installers[0].status = "Installing".to_string();
+            }
+        }
+
+                info!("⬇️  Calling engine.install_module({}) ...", module_name);
+        let start = std::time::Instant::now();
+
+        // Poller
+        let engine_poll = Arc::clone(&engine_worker);
+        let state_poll = Arc::clone(&state_worker);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_poll = Arc::clone(&stop);
+
+        let poll_handle = thread::spawn(move || {
+            while !stop_poll.load(Ordering::Relaxed) {
+                let details = engine_poll.get_download_progress_details();
+
+                if let Ok(mut s) = state_poll.lock() {
+                    if !s.installers.is_empty() {
+                        s.installers[0].progress = details.progress as f32;
+                        s.installers[0].status = details.status.clone();
+                        s.installers[0].message = if details.message.is_empty() {
+                            format!("Downloading {}…", s.installers[0].module_name)
+                        } else {
+                            details.message.clone()
+                        };
+                    }
+                }
+                thread::sleep(Duration::from_millis(80));
+            }
+        });
+
+        // Blocking install (this is where rebuild_mgr runs on success)
+        let result = engine_worker.install_module(&module_source, &module_name);
+
+        // Stop poller ASAP – do not let it race with the just-finished rebuild
+        stop.store(true, Ordering::Relaxed);
+        let _ = poll_handle.join();
+
+        let elapsed = start.elapsed();
+        info!("⬇️  install_module returned {} in {:?}", result, elapsed);
+
+        // Force final UI state (prevents the 0% / “waiting” flicker)
+        let actually_installed = engine_worker.is_module_installed(&module_name);
+
+        if let Ok(mut s) = state_worker.lock() {
+            if !s.installers.is_empty() {
+                if actually_installed {
+                    s.installers[0].status = "complete".to_string();
+                    s.installers[0].progress = 1.0;
+                    s.installers[0].message = "Installation finished".to_string();
+                } else {
+                    s.installers[0].status = "error".to_string();
+                    s.installers[0].message = format!("Install failed (code {})", result);
+                }
             }
         }
 
@@ -182,46 +205,48 @@ fn main() {
     });
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  MAIN UI RENDER LOOP (Main Thread Execution)
+    //  MONITOR LOOP
     // ─────────────────────────────────────────────────────────────────────────
     loop {
         let current_state = match state.lock() {
             Ok(guard) => guard,
-            Err(_) => continue, // Avoid freezing if the background thread has an FFI issue
+            Err(_) => continue,
         };
 
-        // Clear terminal screen completely
+        // Clear screen
         info!("{}[2J{}[H", 27 as char, 27 as char);
         info!("🛰️  === ENGINE PROCESS SYNCHRONIZATION MONITOR ===");
         info!("--------------------------------------------------");
 
         match &current_state.current_step {
             EngineStep::Initializing => {
-                info!("⏳ Hooking FFI bindings and initializing network subsystems...");
+                info!("⏳ Initializing...");
             }
             EngineStep::FetchingSources {
                 current,
                 total,
                 active_source,
             } => {
-                info!("📡 STATUS: Fetching Remote Source Catalogs (Parallel)");
+                info!("📡 STATUS: Fetching Remote Source Catalogs");
                 info!("📦 Progress: Source [{}/{}]", current, total);
-                info!("🔍 Last active worker read: {}", active_source);
-                info!("   Total Sync Progress: ");
+                info!("🔍 Active source: {}", active_source);
+                info!("   Total Sync Progress:");
                 render_progress_bar(current_state.global_progress);
             }
             EngineStep::ProcessingSelection => {
-                info!("📦 STATUS: Unifying Distributed Module Inventories...");
-                info!("🧬 Selecting target testing payloads safely...");
+                info!("📦 STATUS: Selecting module to install...");
             }
             EngineStep::InstallingModules => {
                 info!("📥 STATUS: Installing Module Packages");
                 info!("--------------------------------------------------");
                 for tracker in current_state.installers.iter() {
                     info!(
-                        "📍 Module: {:<14} | Status: {:<10} | ",
+                        "📍 Module: {:<14} | Status: {:<12}",
                         tracker.module_name, tracker.status
                     );
+                    if !tracker.message.is_empty() {
+                        info!("   💬 {}", tracker.message);
+                    }
                     render_progress_bar(tracker.progress);
                 }
             }
@@ -230,11 +255,9 @@ fn main() {
                 break;
             }
             EngineStep::Finished => {
-                info!("🎉 SUCCESS: All remote engine tasks executed with 0 crashes.");
-
-                //check availabel modules
+                info!("🎉 DONE.");
                 let available_modules = engine.get_available_modules();
-                info!("Available Modules now are");
+                info!("Available Modules now are:");
                 info!("{:?}", available_modules);
                 break;
             }
@@ -245,9 +268,6 @@ fn main() {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Explicit Typings Progress Bar Utility
-// ─────────────────────────────────────────────────────────────────────────────
 fn render_progress_bar(progress: f32) {
     let bar_width: i32 = 20;
     let filled_width = (progress * bar_width as f32).round() as i32;

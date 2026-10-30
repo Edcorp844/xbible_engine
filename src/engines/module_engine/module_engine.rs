@@ -3,7 +3,7 @@ use std::ffi::{CStr, CString};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use crate::engines::module_engine::sword_module::module::SwordModule;
@@ -64,25 +64,8 @@ impl ModuleEngine {
         }
     }
 
-    pub unsafe extern "C" fn status_reporter(
-        msg: *const ::std::os::raw::c_char,
-        total: ::std::os::raw::c_ulong,
-        completed: ::std::os::raw::c_ulong,
-    ) {
-        // Use AcqRel ordering for read-modify-write tracking across threads
-        PROGRESS_TOTAL.store(total as u64, Ordering::SeqCst);
-        PROGRESS_COMPLETED.store(completed as u64, Ordering::SeqCst);
-
-        if !msg.is_null() {
-            // Defensive check: wrap in a catch_unwind or direct pointer check
-            // to ensure string parsing doesn't crash during immediate teardown
-            let message = unsafe { CStr::from_ptr(msg).to_string_lossy() };
-            info!("Progress: {}/{} - {}", completed, total, message);
-        }
-    }
-
     pub unsafe fn rebuild_mgr(&self, inner: &mut SwordInner) {
-       debug!("[ModuleEngine] Rebuilding SWMgr...");
+        debug!("[ModuleEngine] Rebuilding SWMgr...");
 
         let path_str = self.sword_path.to_string_lossy().replace("\\", "/");
         let c_path = CString::new(path_str).unwrap();
@@ -400,7 +383,10 @@ impl ModuleEngine {
     fn get_sword_path() -> PathBuf {
         // First check for environment variable (set by Android app)
         if let Ok(path_str) = std::env::var("SWORD_PATH") {
-            debug!("[ModuleEngine] Using SWORD_PATH from environment: {}", path_str);
+            debug!(
+                "[ModuleEngine] Using SWORD_PATH from environment: {}",
+                path_str
+            );
             return PathBuf::from(path_str);
         }
 
