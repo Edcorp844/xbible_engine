@@ -6,5 +6,5 @@
 /android
 /linux
 /windows
-
+/local_module_cache
 .DS_Store
