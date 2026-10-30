@@ -1,6 +1,8 @@
+// src/engines/audio_engine/audio_engine.rs
+
 use std::fs::{self, File};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path};
 use std::sync::{Arc, Mutex};
 
 use chacha20poly1305::{
@@ -8,7 +10,11 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
 };
 use directories::ProjectDirs;
+use serde::{Deserialize, Serialize};
 
+use crate::engines::audio_engine::store::local_store::{
+    XbaMetadata, read_entry_bytes, read_stamped_metadata,
+};
 use crate::engines::audio_engine::utils::artwork::Artwork;
 
 const SECRET_KEY: &[u8; 32] = &[
@@ -16,7 +22,9 @@ const SECRET_KEY: &[u8; 32] = &[
     0x87, 0x60, 0x9e, 0x62, 0x12, 0x28, 0x9d, 0xfa, 0xcd, 0x3e, 0x7b, 0x03, 0xef, 0x81, 0x44, 0xd2,
 ];
 
-// --- ERROR HANDLING ---
+// ─────────────────────────────────────────────────────────────────────────────
+// Errors
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum AudioEngineError {
@@ -46,7 +54,9 @@ impl From<serde_json::Error> for AudioEngineError {
     }
 }
 
-// --- NEW ENUM: REPEAT LAYER ---
+// ─────────────────────────────────────────────────────────────────────────────
+// Enums and node types
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum RepeatMode {
@@ -54,8 +64,6 @@ pub enum RepeatMode {
     One,
     All,
 }
-
-// --- DATA STRUCTURE RECORDS ---
 
 #[derive(Debug, Clone, uniffi::Record, serde::Deserialize)]
 pub struct AudioNode {
@@ -69,7 +77,27 @@ pub struct AudioNode {
     pub children: Vec<AudioNode>,
 }
 
-#[derive(Debug, Clone, uniffi::Record, serde::Deserialize)]
+// ─────────────────────────────────────────────────────────────────────────────
+// Metadata — carries the stamped organization block from the archive
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, uniffi::Record, Serialize, Deserialize)]
+pub struct ModuleOrganization {
+    pub language_code: String,
+    pub language_name: String,
+    pub contributor_name: Option<String>,
+    pub collection_id: String,
+    pub collection_name: String,
+    pub collection_description: Option<String>,
+    pub album_id: String,
+    pub album_title: String,
+    pub album_manifest_version: Option<String>,
+    pub album_order: i32,
+    pub stamped_at: String,
+    pub stamped_by_version: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record, Serialize, Deserialize)]
 pub struct ModuleMetadata {
     pub unique_id: String,
     pub display_title: String,
@@ -81,7 +109,45 @@ pub struct ModuleMetadata {
     pub duration_ms: i64,
     pub features: Vec<String>,
     pub artwork_file: Option<String>,
+    pub organization: Option<ModuleOrganization>,
 }
+
+impl ModuleMetadata {
+    /// Build from the stamped archive metadata. Every stub field is preserved;
+    /// the org block is lifted into its own record.
+    fn from_stamped(meta: &XbaMetadata) -> Self {
+        Self {
+            unique_id: meta.stub.unique_id.clone(),
+            display_title: meta.stub.display_title.clone(),
+            version: meta.stub.version,
+            language: meta.stub.language.clone(),
+            contributor: meta.stub.contributor.clone(),
+            description: meta.stub.description.clone(),
+            source_url: meta.stub.source_url.clone(),
+            duration_ms: meta.stub.duration_ms,
+            features: meta.stub.features.clone(),
+            artwork_file: meta.stub.artwork_file.clone(),
+            organization: Some(ModuleOrganization {
+                language_code: meta.organization.language_code.clone(),
+                language_name: meta.organization.language_name.clone(),
+                contributor_name: meta.organization.contributor_name.clone(),
+                collection_id: meta.organization.collection_id.clone(),
+                collection_name: meta.organization.collection_name.clone(),
+                collection_description: meta.organization.collection_description.clone(),
+                album_id: meta.organization.album_id.clone(),
+                album_title: meta.organization.album_title.clone(),
+                album_manifest_version: meta.organization.album_manifest_version.clone(),
+                album_order: meta.organization.album_order,
+                stamped_at: meta.organization.stamped_at.clone(),
+                stamped_by_version: meta.organization.stamped_by_version.clone(),
+            }),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Installed module view for the UI
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct AudioModuleInfo {
@@ -100,7 +166,6 @@ pub struct PlaybackState {
     pub repeat_mode: RepeatMode,
 }
 
-// --- INTERNAL PLAYBACK MUTABLE STATE MACHINE ---
 #[derive(Debug, Clone, uniffi::Record)]
 struct InternalPlaybackState {
     current_time_ms: i64,
@@ -109,7 +174,9 @@ struct InternalPlaybackState {
     current_duration_ms: i64,
 }
 
-// --- AUDIO ENGINE COORDINATOR ---
+// ─────────────────────────────────────────────────────────────────────────────
+// AudioEngine
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, uniffi::Object)]
 pub struct AudioEngine {
@@ -141,35 +208,55 @@ impl AudioEngine {
         path.to_string_lossy().into_owned()
     }
 
-    pub fn get_audio_modules(&self) -> Vec<AudioModuleInfo> {
-        let mut modules = Vec::new();
-        let path_str = self.get_audio_modules_path();
-        let path = Path::new(&path_str);
+    // ── Module discovery (hierarchy-aware) ────────────────────────────────
 
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let file_path = entry.path();
-                if file_path.is_file()
-                    && file_path
-                        .extension()
-                        .map_or(false, |ext| ext.eq_ignore_ascii_case("xba"))
-                {
-                    if let Some(name_str) = file_path.file_name().and_then(|n| n.to_str()) {
-                        let metadata = self.read_module_metadata_peek(&file_path);
-                        let artwork = Artwork::new(file_path.to_string_lossy().into_owned());
-                        modules.push(AudioModuleInfo {
-                            file_name: name_str.to_string(),
-                            absolute_path: file_path.to_string_lossy().into_owned(),
-                            metadata,
-                            artwork: Arc::new(artwork),
-                        });
-                    }
-                }
+    /// Walk the hierarchy root and return every stamped module.
+    /// Unstamped archives are skipped — only app-blessed modules are visible.
+    pub fn get_audio_modules(&self) -> Vec<AudioModuleInfo> {
+        let root_str = self.get_audio_modules_path();
+        let root = Path::new(&root_str);
+        let mut modules = Vec::new();
+
+        for entry in walkdir::WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let file_path = entry.path();
+            if !file_path.is_file() {
+                continue;
+            }
+            if !file_path
+                .extension()
+                .map_or(false, |ext| ext.eq_ignore_ascii_case("xba"))
+            {
+                continue;
+            }
+
+            let Ok(stamped) = read_stamped_metadata(file_path) else {
+                continue;
+            };
+            if stamped.organization.stamped_at.is_empty() {
+                continue; // not stamped by us
+            }
+
+            let metadata = Some(ModuleMetadata::from_stamped(&stamped));
+            let artwork = Artwork::new(file_path.to_string_lossy().into_owned());
+
+            if let Some(name_str) = file_path.file_name().and_then(|n| n.to_str()) {
+                modules.push(AudioModuleInfo {
+                    file_name: name_str.to_string(),
+                    absolute_path: file_path.to_string_lossy().into_owned(),
+                    metadata,
+                    artwork: Arc::new(artwork),
+                });
             }
         }
+
         modules
     }
 
+    /// Read a single module's stamped metadata without loading audio.
     pub fn peek_module_metadata(
         &self,
         file_path: String,
@@ -178,11 +265,50 @@ impl AudioEngine {
         if !path.exists() {
             return Err(AudioEngineError::ModuleNotFound { path: file_path });
         }
-        self.read_module_metadata_peek(path)
-            .ok_or_else(|| AudioEngineError::SerializationFailure {
-                error_message: "Could not read metadata.json".to_string(),
-            })
+        let stamped =
+            read_stamped_metadata(path).map_err(|e| AudioEngineError::SerializationFailure {
+                error_message: e.to_string(),
+            })?;
+        if stamped.organization.stamped_at.is_empty() {
+            return Err(AudioEngineError::SerializationFailure {
+                error_message: "Archive has not been stamped by the app".to_string(),
+            });
+        }
+        Ok(ModuleMetadata::from_stamped(&stamped))
     }
+
+    /// Read artwork bytes directly out of the archive.
+    /// `kind` is "server" | "contributor" | "album".
+    pub fn get_module_artwork(
+        &self,
+        file_path: String,
+        kind: String,
+    ) -> Result<Vec<u8>, AudioEngineError> {
+        let path = Path::new(&file_path);
+        if !path.exists() {
+            return Err(AudioEngineError::ModuleNotFound { path: file_path });
+        }
+        let stamped =
+            read_stamped_metadata(path).map_err(|e| AudioEngineError::SerializationFailure {
+                error_message: e.to_string(),
+            })?;
+
+        let entry = match kind.as_str() {
+            "server" => stamped.stub.artwork_file.clone(),
+            "contributor" => stamped.organization.contributor_artwork_entry.clone(),
+            "album" => stamped.organization.album_artwork_entry.clone(),
+            _ => None,
+        };
+
+        let Some(name) = entry else {
+            return Ok(Vec::new()); // absent artwork → empty bytes, not an error
+        };
+        read_entry_bytes(path, &name).map_err(|e| AudioEngineError::IoFailure {
+            error_message: e.to_string(),
+        })
+    }
+
+    // ── Audio loading (unchanged logic) ───────────────────────────────────
 
     pub fn load_audio_module(&self, file_path: String) -> Result<Vec<u8>, AudioEngineError> {
         let path = Path::new(&file_path);
@@ -195,8 +321,10 @@ impl AudioEngine {
             error_message: format!("Invalid archive structure: {}", e),
         })?;
 
-        let metadata: Option<ModuleMetadata> = self.read_module_metadata_peek(path);
-        let duration = metadata.map(|m| m.duration_ms).unwrap_or(0);
+        let duration = read_stamped_metadata(path)
+            .ok()
+            .map(|m| m.stub.duration_ms)
+            .unwrap_or(0);
 
         let root_tree: AudioNode =
             if let Ok(mut timestamps_file) = archive.by_name("timestamps.json") {
@@ -220,22 +348,16 @@ impl AudioEngine {
         };
 
         let cipher = ChaCha20Poly1305::new(SECRET_KEY.into());
-        let static_nonce_bytes = b"xbible_media";
-        let nonce = Nonce::from_slice(static_nonce_bytes);
-
+        let nonce = Nonce::from_slice(b"xbible_media");
         let decrypted_audio_bytes = cipher
             .decrypt(nonce, encrypted_audio_bytes.as_slice())
             .map_err(|e| AudioEngineError::DecryptionFailure {
                 error_message: e.to_string(),
             })?;
 
-        let mut tree_lock = self.current_tree.lock().unwrap();
-        *tree_lock = Some(root_tree);
+        *self.current_tree.lock().unwrap() = Some(root_tree);
+        *self.loaded_audio_bytes.lock().unwrap() = Some(decrypted_audio_bytes.clone());
 
-        let mut audio_lock = self.loaded_audio_bytes.lock().unwrap();
-        *audio_lock = Some(decrypted_audio_bytes.clone());
-
-        // Sync state context
         if let Ok(mut state) = self.playback_state.lock() {
             state.current_time_ms = 0;
             state.is_playing = false;
@@ -245,20 +367,15 @@ impl AudioEngine {
         Ok(decrypted_audio_bytes)
     }
 
-    // =========================================================================
-    // RUST CORE AUDIO TRANSPORT METHOD INTERFACES
-    // =========================================================================
+    // ── Transport (unchanged) ─────────────────────────────────────────────
 
-    /// Stop playback completely, resetting timestamps to 0 and dropping loaded audio references
     pub fn stop(&self) {
         if let Ok(mut state) = self.playback_state.lock() {
             state.is_playing = false;
             state.current_time_ms = 0;
         }
-        // Wipe active hardware channels here if required
     }
 
-    /// Skips forward cleanly by (seconds) seconds ((seconds) * 1,000 milliseconds) capped to total duration
     pub fn skip_forward(&self, seconds: i64) {
         if let Ok(mut state) = self.playback_state.lock() {
             let limit = state.current_duration_ms;
@@ -266,14 +383,12 @@ impl AudioEngine {
         }
     }
 
-    /// Backtracks cleanly by (seconds) seconds (seconds * 1,000 milliseconds) bounded at 0
     pub fn skip_backward(&self, seconds: i64) {
         if let Ok(mut state) = self.playback_state.lock() {
             state.current_time_ms = (state.current_time_ms - (seconds * 1000)).max(0);
         }
     }
 
-    /// Assign alternate repeat constraints directly onto the system core
     pub fn set_repeat_mode(&self, mode: RepeatMode) {
         if let Ok(mut state) = self.playback_state.lock() {
             state.repeat_mode = mode;
@@ -304,7 +419,6 @@ impl AudioEngine {
         }
     }
 
-    /// Unified state lookup pulling directly from current values managed inside Rust
     pub fn get_playback_state(&self) -> Option<PlaybackState> {
         let state = self.playback_state.lock().ok()?;
         let tree_lock = self.current_tree.lock().ok()?;
@@ -328,33 +442,18 @@ impl AudioEngine {
     }
 
     pub fn get_navigation_tree(&self) -> Option<AudioNode> {
-        let tree_lock = self.current_tree.lock().unwrap();
-        tree_lock.clone()
+        self.current_tree.lock().unwrap().clone()
     }
 
     pub fn find_active_node_id(&self, time_ms: i64) -> Option<String> {
-        let Some(ref root) = self.get_navigation_tree() else {
-            return None;
-        };
-        if let Some(active_leaf) = find_active_verse_leaf(root, time_ms) {
-            return Some(active_leaf.id.clone());
-        }
-        None
+        let root = self.get_navigation_tree()?;
+        find_active_verse_leaf(&root, time_ms).map(|n| n.id.clone())
     }
 }
 
-// --- STANDARD INTERNAL HELPERS ---
-
-impl AudioEngine {
-    fn read_module_metadata_peek(&self, file_path: &Path) -> Option<ModuleMetadata> {
-        let file = File::open(file_path).ok()?;
-        let mut archive = zip::ZipArchive::new(file).ok()?;
-        let mut meta_file = archive.by_name("metadata.json").ok()?;
-        let mut contents = String::new();
-        meta_file.read_to_string(&mut contents).ok()?;
-        serde_json::from_str(&contents).ok()
-    }
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Tree helpers (unchanged)
+// ─────────────────────────────────────────────────────────────────────────────
 
 pub fn find_node_by_id<'a>(node: &'a AudioNode, id: &str) -> Option<&'a AudioNode> {
     if node.id == id {
