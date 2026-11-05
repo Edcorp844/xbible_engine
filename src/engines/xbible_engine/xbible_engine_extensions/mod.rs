@@ -1,3 +1,4 @@
 pub mod xbible_engine_task_ext;
 pub mod xbible_engine_module_module_engine_ext;
 pub mod xbible_engine_download_progress_ext;
+pub mod xbible_free_bible_api_ext;

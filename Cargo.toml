@@ -29,6 +29,10 @@ futures-util = { version = "0.3.32", features = ["alloc"] }
 bytes = "1.11.1"
 log = { version = "0.4.33", features = ["release_max_level_info"] }
 walkdir = "2.5.0"
+webpki-roots = "1.0.11"
+rustls = "0.23.46"
+rusqlite = { version = "0.40.0", features = ["bundled"] }
+rusqlite_migration = "2.6.0"
 
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]

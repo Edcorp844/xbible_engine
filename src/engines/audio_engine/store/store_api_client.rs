@@ -590,7 +590,6 @@ impl StoreApiClient {
 // ─────────────────────────────────────────────────────────────────────────────
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
-
 #[uniffi::export]
 impl StoreApiClient {
     #[uniffi::constructor]
@@ -604,20 +603,41 @@ impl StoreApiClient {
             reqwest::header::USER_AGENT,
             reqwest::header::HeaderValue::from_static("X-Bible-Engine/1.0"),
         );
-        let client = Client::builder()
+
+        let mut builder = Client::builder()
             .default_headers(headers)
             .timeout(Duration::from_secs(600))
             .read_timeout(Duration::from_secs(60))
             .connect_timeout(Duration::from_secs(15))
-            .tcp_keepalive(Duration::from_secs(15))
-            .build()
-            .unwrap_or_else(|_| Client::new());
+            .tcp_keepalive(Duration::from_secs(15));
+
+        // On Android, reqwest 0.13's default rustls backend routes through
+        // `rustls-platform-verifier`, which needs a JNI handshake with an
+        // Android Context. If that hasn't happened, `.build()` errors and
+        // the fallback `Client::new()` panics on first use. Feed it a
+        // pre-built rustls config with webpki roots to bypass it entirely.
+        #[cfg(target_os = "android")]
+        {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            builder = builder.use_preconfigured_tls(config);
+        }
+
+        let client = builder.build().unwrap_or_else(|e| {
+            // Don't silently fall back — that hides real config errors.
+            panic!("failed to build HTTP client: {e}");
+        });
+
         Self {
             client,
             endpoint_url,
             auth_token,
         }
     }
+
     // ── Languages ──────────────────────────────────────────────────────────
 
     pub async fn fetch_languages(
@@ -1039,12 +1059,29 @@ impl StoreApiClient {
                 reqwest::header::USER_AGENT,
                 reqwest::header::HeaderValue::from_static("X-Bible-Engine/1.0"),
             );
-            let blocking_client = reqwest::blocking::Client::builder()
+
+            let mut blocking_builder = reqwest::blocking::Client::builder()
                 .default_headers(blocking_headers)
                 .timeout(std::time::Duration::from_secs(30))
-                .connect_timeout(std::time::Duration::from_secs(15))
-                .build()
-                .ok();
+                .connect_timeout(std::time::Duration::from_secs(15));
+
+            #[cfg(target_os = "android")]
+            {
+                let mut roots = rustls::RootCertStore::empty();
+                roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+                let config = rustls::ClientConfig::builder()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth();
+                blocking_builder = blocking_builder.use_preconfigured_tls(config);
+            }
+
+            let blocking_client = match blocking_builder.build() {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    log::error!("blocking reqwest client build failed: {e}");
+                    None
+                }
+            };
 
             let fetch_art = |url: &str| -> Option<(Vec<u8>, String)> {
                 let client = blocking_client.as_ref()?;

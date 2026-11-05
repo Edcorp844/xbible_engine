@@ -51,21 +51,17 @@ fn is_valid_static_archive(path: &Path) -> bool {
     &magic == b"!<arch>\n"
 }
 
-/// Ensure `src` becomes a thin Unix static archive named `lib{name}.a` in `out_dir`.
-/// Fat Mach-O universal binaries are thinned with `lipo -thin <arch>`.
 fn thin_static_lib(src: &Path, out_dir: &Path, arch: &str, name: &str) -> PathBuf {
     let dest = out_dir.join(format!("lib{name}.a"));
 
     if is_valid_static_archive(src) {
         if src != dest {
-            fs::copy(src, &dest).unwrap_or_else(|e| {
-                panic!("copy {} -> {}: {}", src.display(), dest.display(), e)
-            });
+            fs::copy(src, &dest)
+                .unwrap_or_else(|e| panic!("copy {} -> {}: {}", src.display(), dest.display(), e));
         }
         return dest;
     }
 
-    // Fat binary (cafe babe) or other format → thin with lipo
     println!(
         "cargo:warning=Thinning {} to arch {} -> {}",
         src.display(),
@@ -98,19 +94,19 @@ fn thin_static_lib(src: &Path, out_dir: &Path, arch: &str, name: &str) -> PathBu
     dest
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Pre-built libcurl / OpenSSL / nghttp2 for iOS only
-//  https://github.com/jasonacox/Build-OpenSSL-cURL/releases/tag/1.0.3
-// ─────────────────────────────────────────────────────────────────────────────
 struct CurlArtifacts {
     include_dir: PathBuf,
-    lib_dir: PathBuf, // directory containing thinned libcurl.a, libssl.a, ...
+    lib_dir: PathBuf,
     has_ssl: bool,
     has_crypto: bool,
     has_nghttp2: bool,
+    shared: bool,
 }
 
-fn locate_prebuilt_curl(
+// ─────────────────────────────────────────────────────────────────────────────
+//  iOS prebuilt (jasonacox) — static libs (unchanged)
+// ─────────────────────────────────────────────────────────────────────────────
+fn locate_prebuilt_curl_ios(
     manifest_dir: &Path,
     out_dir: &Path,
     is_simulator: bool,
@@ -122,7 +118,6 @@ fn locate_prebuilt_curl(
         "x86_64"
     };
 
-    // ── (1) Optional vendor override ───────────────────────────────────────
     let vendor = manifest_dir.join("vendor/curl-ios");
     if vendor.join("include/curl/curl.h").exists() {
         let sub = if is_simulator { "ios-sim" } else { "ios" };
@@ -164,11 +159,11 @@ fn locate_prebuilt_curl(
                 has_ssl,
                 has_crypto,
                 has_nghttp2,
+                shared: false,
             };
         }
     }
 
-    // ── (2) Download 1.0.3 archive into OUT_DIR ─────────────────────────────
     let build_root = out_dir.join("downloaded_curl_ios");
     let archive_dir = build_root.join("archive");
     let expected_root_name = "libcurl-8.17.0-openssl-3.0.18-nghttp2-1.68.0";
@@ -195,13 +190,13 @@ fn locate_prebuilt_curl(
         let tar_path = build_root.join("curl_prebuilt.tgz");
 
         println!(
-            "cargo:warning=Downloading iOS libcurl 1.0.3 from {} ...",
+            "cargo:warning=Downloading iOS libcurl from {} ...",
             download_url
         );
 
         let mut curl_cmd = Command::new("curl");
         curl_cmd.args(["-L", "-f", "-o", tar_path.to_str().unwrap(), download_url]);
-        run(&mut curl_cmd, "Download pre-built libcurl tarball");
+        run(&mut curl_cmd, "Download pre-built iOS libcurl tarball");
 
         let mut tar_cmd = Command::new("tar");
         tar_cmd.args([
@@ -210,7 +205,7 @@ fn locate_prebuilt_curl(
             "-C",
             archive_dir.to_str().unwrap(),
         ]);
-        run(&mut tar_cmd, "Extract pre-built libcurl archive");
+        run(&mut tar_cmd, "Extract pre-built iOS libcurl archive");
     }
 
     let final_base = if archive_dir.join(expected_root_name).exists() {
@@ -222,13 +217,12 @@ fn locate_prebuilt_curl(
     let include_dir = final_base.join("include");
     if !include_dir.join("curl/curl.h").exists() {
         panic!(
-            "curl headers not found under {}. Contents of final_base:\n  {}",
+            "curl headers not found under {}. Contents:\n  {}",
             include_dir.display(),
             list_dir(&final_base)
         );
     }
 
-    // ── Resolve source .a paths (prefer XCFramework) ───────────────────────
     let xc_root = final_base.join("xcframework");
     let slice_name = if is_simulator {
         "ios-arm64_x86_64-simulator"
@@ -254,7 +248,6 @@ fn locate_prebuilt_curl(
         .join("libnghttp2.a");
 
     if !curl_src.exists() {
-        // Fallback: lib/iOS or lib/iOS-simulator (fat binaries — will be thinned)
         let platform = if is_simulator {
             final_base.join("lib").join("iOS-simulator")
         } else {
@@ -264,40 +257,23 @@ fn locate_prebuilt_curl(
         ssl_src = platform.join("libssl.a");
         crypto_src = platform.join("libcrypto.a");
         nghttp2_src = platform.join("libnghttp2.a");
-        println!(
-            "cargo:warning=XCFramework slice '{}' missing; falling back to {}",
-            slice_name,
-            platform.display()
-        );
-    } else {
-        println!(
-            "cargo:warning=Using XCFramework slice '{}' (will thin to {})",
-            slice_name, thin_arch
-        );
     }
 
     if !curl_src.exists() {
         panic!(
-            "libcurl.a not found.\n\
-             Tried XCFramework slice '{}' and lib/iOS*.\n\
-             xcframework/libcurl.xcframework contents:\n  {}\n\
-             lib contents:\n  {}",
+            "libcurl.a not found for iOS.\n  tried slice {}\n  contents:\n  {}",
             slice_name,
-            list_dir(&xc_root.join("libcurl.xcframework")),
-            list_dir(&final_base.join("lib"))
+            list_dir(&final_base)
         );
     }
 
-    // ── Thin everything into one directory ─────────────────────────────────
     let thin_out = out_dir.join("thinned_curl_libs");
     fs::create_dir_all(&thin_out).expect("mkdir thinned_curl_libs");
 
     thin_static_lib(&curl_src, &thin_out, thin_arch, "curl");
-
     let has_ssl = ssl_src.exists();
     let has_crypto = crypto_src.exists();
     let has_nghttp2 = nghttp2_src.exists();
-
     if has_ssl {
         thin_static_lib(&ssl_src, &thin_out, thin_arch, "ssl");
     }
@@ -309,7 +285,7 @@ fn locate_prebuilt_curl(
     }
 
     println!(
-        "cargo:warning=Thinned iOS curl libs ({}) ready at {}",
+        "cargo:warning=iOS curl ready (thinned {}) at {}",
         thin_arch,
         thin_out.display()
     );
@@ -320,11 +296,214 @@ fn locate_prebuilt_curl(
         has_ssl,
         has_crypto,
         has_nghttp2,
+        shared: false,
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Patch SWORD CMakeLists
+//  Android: build OpenSSL + curl from source (static, .a)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CURL_SRC_URL: &str =
+    "https://github.com/curl/curl/releases/download/curl-8_19_0/curl-8.19.0.tar.gz";
+
+fn build_android_static_deps(out_dir: &Path, ndk: &str, abi: &str) -> CurlArtifacts {
+    let cache_key = format!("android-deps-{}", abi);
+    let cache_root = out_dir.join(&cache_key);
+    let ndk_toolchain = Path::new(ndk).join("build/cmake/android.toolchain.cmake");
+
+    if !ndk_toolchain.exists() {
+        panic!(
+            "Android NDK toolchain not found at {}. Check ANDROID_NDK_HOME.",
+            ndk_toolchain.display()
+        );
+    }
+
+    // ── 1. OpenSSL (direct Configure, no wrapper) ────────────────────────────
+    let openssl_dst = cache_root.join("openssl");
+    let openssl_lib = openssl_dst.join("lib");
+    if !openssl_lib.join("libssl.a").exists() || !openssl_lib.join("libcrypto.a").exists() {
+        println!(
+            "cargo:warning=Building OpenSSL static for Android {} ...",
+            abi
+        );
+
+        let openssl_src = cache_root.join("openssl-src");
+        if !openssl_src.join("Configure").exists() {
+            let _ = fs::remove_dir_all(&openssl_src);
+            fs::create_dir_all(&openssl_src).expect("mkdir openssl-src");
+            let tar_path = cache_root.join("openssl-src.tar.gz");
+            let mut cmd = Command::new("curl");
+            cmd.args([
+                "-L",
+                "-f",
+                "-o",
+                tar_path.to_str().unwrap(),
+                "https://www.openssl.org/source/openssl-3.1.5.tar.gz",
+            ]);
+            run(&mut cmd, "Download OpenSSL source");
+            let mut tar = Command::new("tar");
+            tar.args([
+                "-xzf",
+                tar_path.to_str().unwrap(),
+                "-C",
+                openssl_src.to_str().unwrap(),
+                "--strip-components=1",
+            ]);
+            run(&mut tar, "Extract OpenSSL source");
+        }
+
+        let android_target = match abi {
+            "arm64-v8a" => "android-arm64",
+            "armeabi-v7a" => "android-arm",
+            "x86_64" => "android-x86_64",
+            "x86" => "android-x86",
+            _ => panic!("Unsupported Android ABI: {}", abi),
+        };
+
+        let ndk_bin = Path::new(ndk).join("toolchains/llvm/prebuilt/darwin-x86_64/bin");
+        let mut cfg_cmd = Command::new(openssl_src.join("Configure"));
+        cfg_cmd
+            .current_dir(&openssl_src)
+            .arg(android_target)
+            .arg(format!("-D__ANDROID_API__=24"))
+            .arg(format!("--prefix={}", openssl_dst.display()))
+            .arg("no-shared")
+            .arg("no-tests")
+            .env("ANDROID_NDK_ROOT", ndk)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    ndk_bin.display(),
+                    env::var("PATH").unwrap_or_default()
+                ),
+            );
+        run(&mut cfg_cmd, "OpenSSL Configure android-arm64");
+
+        let mut make_cmd = Command::new("make");
+        make_cmd
+            .current_dir(&openssl_src)
+            .arg("-j8")
+            .env("ANDROID_NDK_ROOT", ndk)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    ndk_bin.display(),
+                    env::var("PATH").unwrap_or_default()
+                ),
+            );
+        run(&mut make_cmd, "OpenSSL make");
+
+        let mut install_cmd = Command::new("make");
+        install_cmd
+            .current_dir(&openssl_src)
+            .arg("install_sw")
+            .env("ANDROID_NDK_ROOT", ndk)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    ndk_bin.display(),
+                    env::var("PATH").unwrap_or_default()
+                ),
+            );
+        run(&mut install_cmd, "OpenSSL install_sw");
+    }
+
+    // ── 2. curl ─────────────────────────────────────────────────────────────
+    let curl_src = cache_root.join("curl-src");
+    let curl_dst = cache_root.join("curl");
+    let curl_lib = curl_dst.join("lib");
+
+    if !curl_lib.join("libcurl.a").exists() {
+        if curl_src.exists() {
+            let _ = fs::remove_dir_all(&curl_src);
+        }
+        if curl_dst.exists() {
+            let _ = fs::remove_dir_all(&curl_dst);
+        }
+
+        println!("cargo:warning=Building curl static for Android {} ...", abi);
+
+        fs::create_dir_all(&curl_src).expect("mkdir curl-src");
+        let tar_path = cache_root.join("curl-src.tar.gz");
+        let mut cmd = Command::new("curl");
+        cmd.args(["-L", "-f", "-o", tar_path.to_str().unwrap(), CURL_SRC_URL]);
+        run(&mut cmd, "Download curl source");
+        let mut tar = Command::new("tar");
+        tar.args([
+            "-xzf",
+            tar_path.to_str().unwrap(),
+            "-C",
+            curl_src.to_str().unwrap(),
+            "--strip-components=1",
+        ]);
+        run(&mut tar, "Extract curl source");
+
+        let mut cfg = cmake::Config::new(&curl_src);
+        cfg.define("CMAKE_TOOLCHAIN_FILE", ndk_toolchain.to_str().unwrap())
+            .define("CMAKE_MAKE_PROGRAM", "make")
+            .define("BUILD_SHARED_LIBS", "OFF")
+            .define("CURL_USE_OPENSSL", "ON")
+            .define("OPENSSL_USE_STATIC_LIBS", "ON")
+            .define(
+                "OPENSSL_INCLUDE_DIR",
+                openssl_dst.join("include").to_str().unwrap(),
+            )
+            .define(
+                "OPENSSL_SSL_LIBRARY",
+                openssl_lib.join("libssl.a").to_str().unwrap(),
+            )
+            .define(
+                "OPENSSL_CRYPTO_LIBRARY",
+                openssl_lib.join("libcrypto.a").to_str().unwrap(),
+            )
+            .define("ANDROID_ABI", abi)
+            .define("ANDROID_PLATFORM", "android-24")
+            .define("CURL_DISABLE_LDAP", "ON")
+            .define("CURL_USE_LIBPSL", "OFF")
+            .define("CURL_ZLIB", "OFF")
+            .define("CURL_BROTLI", "OFF")
+            .define("CURL_ZSTD", "OFF")
+            .define("USE_NGHTTP2", "OFF")
+            .out_dir(&curl_dst);
+
+        let built = cfg.build();
+
+        if !built.join("lib/libcurl.a").exists() {
+            panic!(
+                "curl build did not produce libcurl.a. Output dir: {}. Contents:\n  {}",
+                built.display(),
+                list_dir(&built)
+            );
+        }
+    }
+
+    // ── 3. return ───────────────────────────────────────────────────────────
+    let include_dir = curl_dst.join("include");
+    let has_ssl = openssl_lib.join("libssl.a").exists();
+    let has_crypto = openssl_lib.join("libcrypto.a").exists();
+
+    println!(
+        "cargo:warning=Android static deps ready at {} (curl) + {} (openssl)",
+        curl_lib.display(),
+        openssl_lib.display()
+    );
+
+    CurlArtifacts {
+        include_dir,
+        lib_dir: curl_lib,
+        has_ssl,
+        has_crypto,
+        has_nghttp2: false,
+        shared: false,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Patch SWORD CMakeLists  (unchanged)
 // ─────────────────────────────────────────────────────────────────────────────
 fn patch_sword_cmakelists(
     sword_src: &Path,
@@ -426,9 +605,6 @@ set(NOTESTS TRUE)
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Main
-// ─────────────────────────────────────────────────────────────────────────────
 fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target_triple = env::var("TARGET").unwrap();
@@ -461,10 +637,9 @@ fn main() {
         clone_dir
     };
 
-    // CURL feature on for these OSes; prebuilt static libs only on iOS
     let enable_curl = matches!(
         target_os.as_str(),
-        "macos" | "windows" | "linux" | "ios"
+        "macos" | "windows" | "linux" | "ios" | "android"
     );
 
     let raw_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "arm64".to_string());
@@ -510,12 +685,7 @@ fn main() {
         });
     }
 
-    patch_sword_cmakelists(
-        &sword_src,
-        &target_os,
-        sdk_inc_path.as_deref(),
-        enable_curl,
-    );
+    patch_sword_cmakelists(&sword_src, &target_os, sdk_inc_path.as_deref(), enable_curl);
 
     let mut cmake = cmake::Config::new(&sword_src);
     cmake
@@ -541,6 +711,8 @@ fn main() {
 
     let mut curl_link_dir: Option<PathBuf> = None;
     let mut extra_link_libs: Vec<&'static str> = Vec::new();
+    let mut android_curl: Option<CurlArtifacts> = None;
+    let mut android_openssl_lib_dir: Option<PathBuf> = None;
 
     match target_os.as_str() {
         "ios" => {
@@ -559,14 +731,13 @@ fn main() {
             let cc = String::from_utf8_lossy(&cc.stdout).trim().to_string();
             let cxx = String::from_utf8_lossy(&cxx.stdout).trim().to_string();
 
-            let art = locate_prebuilt_curl(&manifest_dir, &out_dir, is_simulator, arch);
+            let art = locate_prebuilt_curl_ios(&manifest_dir, &out_dir, is_simulator, arch);
 
             println!("cargo:rustc-link-arg=-target");
             println!("cargo:rustc-link-arg={}", apple_target);
             println!("cargo:rustc-link-search=native={}", art.lib_dir.display());
 
             curl_link_dir = Some(art.lib_dir.clone());
-
             if art.has_ssl {
                 extra_link_libs.push("ssl");
             }
@@ -610,17 +781,56 @@ fn main() {
                 }
                 let abi = if target_triple.contains("x86_64") {
                     "x86_64"
+                } else if target_triple.contains("i686") {
+                    "x86"
+                } else if target_triple.contains("armv7") {
+                    "armeabi-v7a"
                 } else {
                     "arm64-v8a"
                 };
+
+                let art = build_android_static_deps(&out_dir, &ndk, abi);
+
+                let curl_lib = art.lib_dir.join("libcurl.a");
+                let openssl_lib_dir = art
+                    .lib_dir
+                    .parent() // .../android-deps-arm64-v8a/curl
+                    .unwrap()
+                    .parent() // .../android-deps-arm64-v8a
+                    .unwrap()
+                    .join("openssl")
+                    .join("lib");
+                let curl_cflags = format!("-I{}", art.include_dir.display());
+
+                // Link group: curl needs ssl+crypto symbols, ssl needs crypto,
+                // crypto may need symbols from either. Without --start-group,
+                // ld.lld drops ssl/crypto symbols that appear before curl uses
+                // them, causing "undefined symbol: i2d_SSL_SESSION" etc.
+                let link_group = format!(
+                    "-Wl,--start-group {}/libcurl.a {}/libssl.a {}/libcrypto.a -Wl,--end-group -llog",
+                    art.lib_dir.display(),
+                    openssl_lib_dir.display(),
+                    openssl_lib_dir.display(),
+                );
+
                 cmake
-                    .define("SWORD_CURL", "OFF")
-                    .define("CURL_FOUND", "FALSE")
+                    .define("SWORD_CURL", "ON")
+                    .define("CURL_FOUND", "TRUE")
+                    .define("CURL_INCLUDE_DIR", art.include_dir.to_str().unwrap())
+                    .define("CURL_LIBRARY", curl_lib.to_str().unwrap())
                     .define("ANDROID_ABI", abi)
                     .define("ANDROID_PLATFORM", "android-24")
-                    .define("CMAKE_SHARED_LINKER_FLAGS", "-llog")
+                    .define("ANDROID_STL", "c++_shared")
+                    .define("CMAKE_SHARED_LINKER_FLAGS", &link_group)
+                    .define("CMAKE_MODULE_LINKER_FLAGS", &link_group)
+                    .define("CMAKE_EXE_LINKER_FLAGS", &link_group)
                     .cflag("-DIOAPI_NO_64")
-                    .cxxflag("-DIOAPI_NO_64");
+                    .cxxflag("-DIOAPI_NO_64")
+                    .cflag(&curl_cflags)
+                    .cxxflag(&curl_cflags);
+
+                android_curl = Some(art);
+                android_openssl_lib_dir = Some(openssl_lib_dir);
             }
         }
         _ => {}
@@ -656,7 +866,7 @@ fn main() {
             for lib in &extra_link_libs {
                 println!("cargo:rustc-link-lib=static={}", lib);
             }
-             println!("cargo:rustc-link-lib=static=bz2");
+            println!("cargo:rustc-link-lib=static=bz2");
             println!("cargo:rustc-link-lib=dylib=z");
             println!("cargo:rustc-link-lib=dylib=c++");
             println!("cargo:rustc-link-lib=framework=CFNetwork");
@@ -665,9 +875,25 @@ fn main() {
             println!("cargo:rustc-link-lib=framework=SystemConfiguration");
         }
         "android" => {
-            println!("cargo:rustc-link-lib=dylib=z");
-            println!("cargo:rustc-link-lib=dylib=c++_shared");
-            println!("cargo:rustc-link-lib=dylib=log");
+            if let Some(art) = android_curl.as_ref() {
+                let curl_dir = art.lib_dir.to_str().unwrap();
+                let openssl_dir = android_openssl_lib_dir.as_ref().unwrap().to_str().unwrap();
+
+                println!("cargo:rustc-link-search=native={}", curl_dir);
+                println!("cargo:rustc-link-search=native={}", openssl_dir);
+
+                println!("cargo:rustc-link-arg=-Wl,--start-group");
+                println!("cargo:rustc-link-arg={}/libcurl.a", curl_dir);
+                println!("cargo:rustc-link-arg={}/libssl.a", openssl_dir);
+                println!("cargo:rustc-link-arg={}/libcrypto.a", openssl_dir);
+                println!("cargo:rustc-link-arg=-Wl,--end-group");
+
+                println!("cargo:rustc-link-arg=-Wl,--allow-multiple-definition");
+
+                println!("cargo:rustc-link-lib=dylib=z");
+                println!("cargo:rustc-link-lib=dylib=c++_shared");
+                println!("cargo:rustc-link-lib=dylib=log");
+            }
         }
         _ => {
             if let Ok(icu_uc) = pkg_config::Config::new().probe("icu-uc") {
@@ -715,11 +941,7 @@ fn main() {
                 builder = builder.clang_arg("-miphoneos-version-min=14.0");
             }
 
-            if let Some(dir) = curl_link_dir.as_ref() {
-                // Headers live next to the downloaded archive, not the thinned dir
-                // (include path already passed via CURL_INCLUDE_DIR / cmake)
-                let _ = dir;
-            }
+            let _ = curl_link_dir;
         }
         "macos" => {
             if let Ok(sdk) = env::var("SDKROOT") {

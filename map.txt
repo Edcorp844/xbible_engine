@@ -1,0 +1,37 @@
+xbible_engine/
+├── Cargo.toml
+├── build.rs
+├── src/
+│   ├── lib.rs                  ← UniFFI scaffolding only
+│   ├── engines/
+│   │   ├── mod.rs              ← exports all three engines + orchestrator
+│   │   ├── sword_engine/
+│   │   │   ├── mod.rs
+│   │   │   ├── client.rs       ← C-ABI calls into libsword.a
+│   │   │   └── types.rs        ← SwordModule, SwordVerse
+│   │   ├── freebible_engine/
+│   │   │   ├── mod.rs
+│   │   │   ├── client.rs       ← reqwest calls to bible-api.helloao.org
+│   │   │   ├── db.rs           ← rusqlite local store
+│   │   │   └── types.rs
+│   │   └── stepbible_engine/
+│   │       ├── mod.rs
+│   │       ├── lexicon.rs      ← loads STEPBible lexicon into SQLite
+│   │       ├── db.rs
+│   │       └── types.rs
+│   ├── orchestrator/
+│   │   ├── mod.rs              ← the single entry point everything funnels through
+│   │   ├── word_study.rs       ← combines verse text + lexicon + Strong's
+│   │   └── store.rs            ← unified store: sword repo + helloao catalog
+│   ├── db/
+│   │   ├── mod.rs
+│   │   ├── schema.rs           ← CREATE TABLE statements
+│   │   └── migrations.rs
+│   └── ffi/
+│       ├── mod.rs              ← #[uniffi::export] impl blocks
+│       ├── types.rs            ← #[derive(uniffi::Record)] structs
+│       └── tasks.rs            ← async task tracking (fetch, install)
+└── tests/
+    ├── sword_engine_test.rs
+    ├── freebible_engine_test.rs
+    └── orchestrator_test.rs
