@@ -1,7 +1,12 @@
 use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
+use crate::db::error::DbError;
+
 pub mod catalog;
+pub mod connection;
+pub mod connection_state;
+pub mod error;
 
 const MIGRATIONS: &[M<'_>] = &[
     // ── v1: catalog tables ─────────────────────────────────────────
@@ -293,14 +298,16 @@ const MIGRATIONS: &[M<'_>] = &[
     ),
 ];
 
-pub fn open(path: &str) -> rusqlite::Result<Connection> {
-    let mut conn = Connection::open(path)?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
+pub fn open(path: &str) -> Result<Connection, DbError> {
+    let mut conn = Connection::open(path).map_err(DbError::Sqlite)?;
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .map_err(DbError::Sqlite)?;
     let migrations = Migrations::from_slice(MIGRATIONS);
-    migrations.to_latest(&mut conn).map_err(to_sqlite_err)?;
+    migrations.to_latest(&mut conn).map_err(DbError::Migration)?;
     Ok(conn)
 }
 
+#[allow(dead_code)]
 fn to_sqlite_err(e: rusqlite_migration::Error) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(e))
 }

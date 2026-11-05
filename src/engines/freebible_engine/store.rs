@@ -1,21 +1,17 @@
-use crate::db::catalog;
+// freebible_engine/store.rs
 
-use super::client::{
-    BibleClient, FreeBibleCommentary, FreeBibleDataset, FreeBibleTranslation,
-};
-use log::error;
 use std::collections::HashMap;
 
-#[derive(Debug)]
-pub struct Store {
-    translations: Vec<FreeBibleTranslation>,
-    commentaries: Vec<FreeBibleCommentary>,
-    datasets: Vec<FreeBibleDataset>,
-    languages: Vec<LanguageFacet>,
-    translation_languages: HashMap<String, String>,
-    commentary_languages: HashMap<String, String>,
-    dataset_languages: HashMap<String, String>,
-}
+use log::error;
+
+use crate::db::catalog::{self, DomainCommentary, DomainDataset, DomainTranslation};
+
+use super::client::{BibleClient, FreeBibleCommentary, FreeBibleDataset, FreeBibleTranslation};
+use super::values::{
+    BookCount, ChapterCount, Flag, LanguageCode, ShelfId, StoreItemId, StoreItemKind, VerseCount,
+};
+
+// ── UniFFI records (public wire format — primitives only) ───────
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct LanguageFacet {
@@ -51,12 +47,107 @@ pub struct StoreShelf {
     pub items: Vec<StoreItem>,
 }
 
+// ── Domain item (used internally, newtypes everywhere) ──────────
+
+#[derive(Debug, Clone)]
+pub struct DomainStoreItem {
+    pub id: StoreItemId,
+    pub name: String,
+    pub english_name: String,
+    pub short_name: String,
+    pub language: LanguageCode,
+    pub language_name: Option<String>,
+    pub description: String,
+    pub badge: Option<ItemBadge>,
+    pub installed: Flag,
+    pub has_strongs: Flag,
+    pub books: BookCount,
+    pub chapters: ChapterCount,
+    pub verses: VerseCount,
+}
+
+/// Closed set of badge strings the UI may show. Adding a new one
+/// forces updating `as_str` and `Display`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemBadge {
+    Interlinear,
+    PublicDomain,
+    Commentary,
+    Lexicon,
+    Dataset,
+    People,
+    Events,
+    Places,
+    Groups,
+}
+
+impl ItemBadge {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Interlinear => "Interlinear",
+            Self::PublicDomain => "Public domain",
+            Self::Commentary => "Commentary",
+            Self::Lexicon => "Lexicon",
+            Self::Dataset => "Dataset",
+            Self::People => "People",
+            Self::Events => "Events",
+            Self::Places => "Places",
+            Self::Groups => "Groups",
+        }
+    }
+}
+
+// ── FFI conversions ────────────────────────────────────────────
+
+impl From<DomainStoreItem> for StoreItem {
+    fn from(d: DomainStoreItem) -> Self {
+        Self {
+            id: d.id.raw,
+            kind: d.id.kind.as_wire().to_string(),
+            name: d.name,
+            english_name: d.english_name,
+            short_name: d.short_name,
+            language: d.language.into_inner(),
+            language_name: d.language_name,
+            description: d.description,
+            badge: d.badge.map(|b| b.as_str().to_string()),
+            installed: d.installed.as_bool(),
+            has_strongs: d.has_strongs.as_bool(),
+            book_count: d.books.raw(),
+            chapter_count: d.chapters.raw(),
+            verse_count: d.verses.raw(),
+        }
+    }
+}
+
+/// Try to parse a `StoreItem`'s wire fields back into the domain
+/// type. Used only by the FFI facade when it needs to re-key items.
+pub fn domain_kind_of(item: &StoreItem) -> Option<StoreItemKind> {
+    StoreItemKind::from_wire(&item.kind)
+}
+
+// ── The Store itself ───────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct Store {
+    translations: Vec<DomainTranslation>,
+    commentaries: Vec<DomainCommentary>,
+    datasets: Vec<DomainDataset>,
+    languages: Vec<LanguageFacet>,
+}
+
+// ── Fetch ──────────────────────────────────────────────────────
+
 impl Store {
-    pub fn fetch(
+    pub fn fetch_index(
         client: &BibleClient,
         conn: Option<&rusqlite::Connection>,
     ) -> Result<Self, String> {
-        match (client.translations(), client.commentaries(), client.datasets()) {
+        match (
+            client.translations(),
+            client.commentaries(),
+            client.datasets(),
+        ) {
             (Ok(t), Ok(c), Ok(d)) => {
                 if let Some(conn) = conn {
                     if let Err(e) = catalog::save_translations(conn, &t) {
@@ -69,7 +160,7 @@ impl Store {
                         error!("save_datasets failed: {}", e);
                     }
                 }
-                Ok(Self::from_parts(t, c, d))
+                Ok(Self::from_client_parts(t, c, d))
             }
             _ => {
                 let conn = conn.ok_or("network failed and no local database")?;
@@ -79,175 +170,225 @@ impl Store {
                 if t.is_empty() {
                     return Err("network failed and local database is empty".into());
                 }
-                Ok(Self::from_parts(t, c, d))
+                Ok(Self::from_domains(t, c, d))
             }
         }
     }
 
-    /// Build a Store from already-fetched parts. Public so callers that
-    /// fetched data themselves (e.g. `refresh` in `store_api`) can skip
-    /// `fetch` and its lock-holding behavior.
-    pub fn from_parts(
+    /// Convert freshly-fetched client records into the domain model.
+    /// Relies on `From<&FreeBibleTranslation>` etc. defined in
+    /// `db::catalog` so the conversion lives in exactly one place.
+    fn from_client_parts(
         translations: Vec<FreeBibleTranslation>,
         commentaries: Vec<FreeBibleCommentary>,
         datasets: Vec<FreeBibleDataset>,
     ) -> Self {
+        let t: Vec<DomainTranslation> = translations.iter().map(Into::into).collect();
+        let c: Vec<DomainCommentary> = commentaries.iter().map(Into::into).collect();
+        let d: Vec<DomainDataset> = datasets.iter().map(Into::into).collect();
+        Self::from_domains(t, c, d)
+    }
+
+    fn from_domains(
+        translations: Vec<DomainTranslation>,
+        commentaries: Vec<DomainCommentary>,
+        datasets: Vec<DomainDataset>,
+    ) -> Self {
         let languages = Self::build_facets(&translations, &commentaries);
-        let translation_languages = translations
-            .iter()
-            .map(|t| (t.id.clone(), t.language.clone()))
-            .collect();
-        let commentary_languages = commentaries
-            .iter()
-            .map(|c| (c.id.clone(), c.language.clone()))
-            .collect();
-        let dataset_languages = datasets
-            .iter()
-            .map(|d| (d.id.clone(), d.language.clone()))
-            .collect();
         Self {
             translations,
             commentaries,
             datasets,
             languages,
-            translation_languages,
-            commentary_languages,
-            dataset_languages,
         }
     }
 
-    // ── Feed ─────────────────────────────────────────────────────
+    // ── Feed ────────────────────────────────────────────────────
 
     pub fn home_feed(&self, language: Option<&str>) -> Vec<StoreShelf> {
-        vec![
-            self.shelf_featured(language),
-            self.shelf_interlinear(language),
-            self.shelf_public_domain(language),
-            self.shelf_commentaries(language),
-            self.shelf_datasets(language),
-            self.shelf_all(language),
-        ]
-        .into_iter()
-        .filter(|s| !s.items.is_empty())
-        .collect()
+        ShelfId::ALL
+            .iter()
+            .map(|&shelf| self.shelf(shelf, language))
+            .filter(|s| !s.items.is_empty())
+            .collect()
     }
 
-    fn shelf_featured(&self, language: Option<&str>) -> StoreShelf {
-        let ids: &[(&str, &str)] = &[
-            ("BSB", "translation"),
-            ("eng_kjv", "translation"),
-            ("eng_web", "translation"),
-            ("adam-clarke", "commentary"),
-            ("tyndale", "commentary"),
-            ("stepbible-lexicon", "dataset"),
-        ];
-        let items: Vec<StoreItem> = ids
-            .iter()
-            .filter_map(|(id, kind)| self.item(id, kind))
-            .filter(|i| language.map(|l| i.language == l).unwrap_or(true))
-            .collect();
+    pub fn shelf(&self, shelf: ShelfId, language: Option<&str>) -> StoreShelf {
+        let items = self.shelf_items(shelf, language);
         StoreShelf {
-            title: "Featured".into(),
-            subtitle: Some("Hand-picked for study".into()),
-            items,
+            title: shelf.title().to_string(),
+            subtitle: shelf.subtitle().map(|s| s.to_string()).or_else(|| {
+                if shelf == ShelfId::AllResources {
+                    Some(format!("{} items", items.len()))
+                } else {
+                    None
+                }
+            }),
+            items: items.into_iter().map(StoreItem::from).collect(),
         }
     }
 
-    fn shelf_interlinear(&self, language: Option<&str>) -> StoreShelf {
-        let items = self
-            .translations
+    pub fn shelf_page(
+        &self,
+        shelf_id: &str,
+        language: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<StoreItem> {
+        let Some(shelf) = ShelfId::from_title(shelf_id) else {
+            return Vec::new();
+        };
+        let all = self.shelf_items(shelf, language);
+        all.into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(StoreItem::from)
+            .collect()
+    }
+
+    pub fn shelf_total(&self, shelf_id: &str, language: Option<&str>) -> u32 {
+        let Some(shelf) = ShelfId::from_title(shelf_id) else {
+            return 0;
+        };
+        self.shelf_items(shelf, language).len() as u32
+    }
+
+    fn shelf_items(&self, shelf: ShelfId, language: Option<&str>) -> Vec<DomainStoreItem> {
+        match shelf {
+            ShelfId::Featured => self.items_featured(language),
+            ShelfId::BibleReference => self.items_entities(language),
+            ShelfId::WordStudy => self.items_interlinear(language),
+            ShelfId::PublicDomain => self.items_public_domain(language),
+            ShelfId::Commentaries => self.items_commentaries(language),
+            ShelfId::StudyTools => self.items_datasets(language),
+            ShelfId::AllResources => self.items_all(language),
+        }
+    }
+
+    fn items_featured(&self, language: Option<&str>) -> Vec<DomainStoreItem> {
+        let featured_ids: &[StoreItemId] = &[
+            StoreItemId::translation("BSB"),
+            StoreItemId::translation("eng_kjv"),
+            StoreItemId::translation("eng_web"),
+            StoreItemId::commentary("adam-clarke"),
+            StoreItemId::commentary("tyndale"),
+            StoreItemId::dataset("stepbible-lexicon"),
+        ];
+        featured_ids
+            .iter()
+            .filter_map(|id| self.item(id))
+            .filter(|i| language.map(|l| i.language.as_str() == l).unwrap_or(true))
+            .collect()
+    }
+
+    fn items_interlinear(&self, language: Option<&str>) -> Vec<DomainStoreItem> {
+        self.translations
             .iter()
             .filter(|t| t.id == "BSB" || t.id.starts_with("eng_kjv"))
-            .filter(|t| language.map(|l| t.language == l).unwrap_or(true))
-            .map(Self::translation_to_item)
-            .collect();
-        StoreShelf {
-            title: "Word Study".into(),
-            subtitle: Some("Original-language alignment with Strong's".into()),
-            items,
-        }
+            .filter(|t| language.map(|l| t.language.as_str() == l).unwrap_or(true))
+            .map(Self::translation_item)
+            .collect()
     }
 
-    fn shelf_public_domain(&self, language: Option<&str>) -> StoreShelf {
-        let public_domain: &[&str] = &["eng_kjv", "eng_web", "eng_asv", "eng_kja", "BSB"];
-        let items = self
-            .translations
+    fn items_public_domain(&self, language: Option<&str>) -> Vec<DomainStoreItem> {
+        const PUBLIC_DOMAIN: &[&str] = &["eng_kjv", "eng_web", "eng_asv", "eng_kja", "BSB"];
+        self.translations
             .iter()
-            .filter(|t| public_domain.contains(&t.id.as_str()))
-            .filter(|t| language.map(|l| t.language == l).unwrap_or(true))
-            .map(Self::translation_to_item)
-            .collect();
-        StoreShelf {
-            title: "Public Domain".into(),
-            subtitle: Some("Free to use, no strings attached".into()),
-            items,
-        }
+            .filter(|t| PUBLIC_DOMAIN.contains(&t.id.as_str()))
+            .filter(|t| language.map(|l| t.language.as_str() == l).unwrap_or(true))
+            .map(Self::translation_item)
+            .collect()
     }
 
-    fn shelf_commentaries(&self, language: Option<&str>) -> StoreShelf {
-        let items = self
-            .commentaries
+    fn items_commentaries(&self, language: Option<&str>) -> Vec<DomainStoreItem> {
+        self.commentaries
             .iter()
-            .filter(|c| language.map(|l| c.language == l).unwrap_or(true))
-            .map(Self::commentary_to_item)
-            .collect();
-        StoreShelf {
-            title: "Commentaries".into(),
-            subtitle: Some("Verse-by-verse explanations and insights".into()),
-            items,
-        }
+            .filter(|c| language.map(|l| c.language.as_str() == l).unwrap_or(true))
+            .map(Self::commentary_item)
+            .collect()
     }
 
-    fn shelf_datasets(&self, language: Option<&str>) -> StoreShelf {
-        let items = self
-            .datasets
+    fn items_datasets(&self, language: Option<&str>) -> Vec<DomainStoreItem> {
+        self.datasets
             .iter()
-            .filter(|d| language.map(|l| d.language == l).unwrap_or(true))
-            .map(Self::dataset_to_item)
-            .collect();
-        StoreShelf {
-            title: "Study Tools".into(),
-            subtitle: Some("Lexicons, cross-references, and more".into()),
-            items,
-        }
+            .filter(|d| d.id != "theographic")
+            .filter(|d| language.map(|l| d.language.as_str() == l).unwrap_or(true))
+            .map(Self::dataset_item)
+            .collect()
     }
 
-    fn shelf_all(&self, language: Option<&str>) -> StoreShelf {
-        let mut items: Vec<StoreItem> = Vec::new();
+    fn items_all(&self, language: Option<&str>) -> Vec<DomainStoreItem> {
+        let mut items = Vec::new();
         items.extend(
             self.translations
                 .iter()
-                .filter(|t| language.map(|l| t.language == l).unwrap_or(true))
-                .map(Self::translation_to_item),
+                .filter(|t| language.map(|l| t.language.as_str() == l).unwrap_or(true))
+                .map(Self::translation_item),
         );
         items.extend(
             self.commentaries
                 .iter()
-                .filter(|c| language.map(|l| c.language == l).unwrap_or(true))
-                .map(Self::commentary_to_item),
+                .filter(|c| language.map(|l| c.language.as_str() == l).unwrap_or(true))
+                .map(Self::commentary_item),
         );
         items.extend(
             self.datasets
                 .iter()
-                .filter(|d| language.map(|l| d.language == l).unwrap_or(true))
-                .map(Self::dataset_to_item),
+                .filter(|d| language.map(|l| d.language.as_str() == l).unwrap_or(true))
+                .map(Self::dataset_item),
         );
         items.sort_by(|a, b| a.name.cmp(&b.name));
-        StoreShelf {
-            title: "All Resources".into(),
-            subtitle: Some(format!("{} items", items.len())),
-            items,
-        }
+        items
     }
 
-    // ── Search ───────────────────────────────────────────────────
-
-    pub fn search(&self, query: &str) -> Vec<StoreItem> {
-        if query.trim().is_empty() {
+    fn items_entities(&self, language: Option<&str>) -> Vec<DomainStoreItem> {
+        if language.map(|l| l != "eng").unwrap_or(false) {
             return Vec::new();
         }
-        let q = query.to_lowercase();
-        let mut items: Vec<StoreItem> = Vec::new();
+        vec![
+            entity_set_item(
+                "theographic:person",
+                "Bible Characters",
+                "Characters",
+                "3067 people from Scripture",
+                3067,
+                ItemBadge::People,
+            ),
+            entity_set_item(
+                "theographic:event",
+                "Bible Events",
+                "Events",
+                "450 events from Scripture",
+                450,
+                ItemBadge::Events,
+            ),
+            entity_set_item(
+                "theographic:place",
+                "Bible Places",
+                "Places",
+                "1274 places from Scripture",
+                1274,
+                ItemBadge::Places,
+            ),
+            entity_set_item(
+                "theographic:group",
+                "People Groups",
+                "Groups",
+                "23 people groups from Scripture",
+                23,
+                ItemBadge::Groups,
+            ),
+        ]
+    }
+
+    // ── Search ──────────────────────────────────────────────────
+
+    pub fn search(&self, query: &str) -> Vec<StoreItem> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        let mut items = Vec::new();
         items.extend(
             self.translations
                 .iter()
@@ -260,69 +401,107 @@ impl Store {
                             .map(|n| n.to_lowercase().contains(&q))
                             .unwrap_or(false)
                 })
-                .map(Self::translation_to_item),
+                .map(Self::translation_item),
         );
         items.extend(
             self.commentaries
                 .iter()
                 .filter(|c| {
-                    c.name.to_lowercase().contains(&q) || c.english_name.to_lowercase().contains(&q)
+                    c.name.to_lowercase().contains(&q)
+                        || c.english_name.to_lowercase().contains(&q)
                 })
-                .map(Self::commentary_to_item),
+                .map(Self::commentary_item),
         );
         items.extend(
             self.datasets
                 .iter()
                 .filter(|d| {
-                    d.name.to_lowercase().contains(&q) || d.english_name.to_lowercase().contains(&q)
+                    d.name.to_lowercase().contains(&q)
+                        || d.english_name.to_lowercase().contains(&q)
                 })
-                .map(Self::dataset_to_item),
+                .map(Self::dataset_item),
         );
         items.sort_by(|a, b| a.name.cmp(&b.name));
-        items
+        items.into_iter().map(StoreItem::from).collect()
     }
 
-    // ── Facets ───────────────────────────────────────────────────
+    // ── Facets ──────────────────────────────────────────────────
 
     pub fn languages(&self) -> Vec<LanguageFacet> {
         self.languages.clone()
     }
 
-    // ── Item lookup ──────────────────────────────────────────────
+    // ── Item lookup ────────────────────────────────────────────
 
-    pub fn item(&self, id: &str, kind: &str) -> Option<StoreItem> {
-        match kind {
-            "translation" => self
+    pub fn item(&self, id: &StoreItemId) -> Option<DomainStoreItem> {
+        match id.kind {
+            StoreItemKind::Translation => self
                 .translations
                 .iter()
-                .find(|t| t.id == id)
-                .map(Self::translation_to_item),
-            "commentary" => self
+                .find(|t| t.id == id.raw)
+                .map(Self::translation_item),
+            StoreItemKind::Commentary => self
                 .commentaries
                 .iter()
-                .find(|c| c.id == id)
-                .map(Self::commentary_to_item),
-            "dataset" => self
+                .find(|c| c.id == id.raw)
+                .map(Self::commentary_item),
+            StoreItemKind::Dataset => self
                 .datasets
                 .iter()
-                .find(|d| d.id == id)
-                .map(Self::dataset_to_item),
-            _ => None,
+                .find(|d| d.id == id.raw)
+                .map(Self::dataset_item),
+            StoreItemKind::EntitySet => {
+                let parts: Vec<&str> = id.raw.splitn(2, ':').collect();
+                match parts.as_slice() {
+                    ["theographic", "person"] => Some(entity_set_item(
+                        "theographic:person",
+                        "Bible Characters",
+                        "Characters",
+                        "3067 people from Scripture",
+                        3067,
+                        ItemBadge::People,
+                    )),
+                    ["theographic", "event"] => Some(entity_set_item(
+                        "theographic:event",
+                        "Bible Events",
+                        "Events",
+                        "450 events from Scripture",
+                        450,
+                        ItemBadge::Events,
+                    )),
+                    ["theographic", "place"] => Some(entity_set_item(
+                        "theographic:place",
+                        "Bible Places",
+                        "Places",
+                        "1274 places from Scripture",
+                        1274,
+                        ItemBadge::Places,
+                    )),
+                    ["theographic", "group"] => Some(entity_set_item(
+                        "theographic:group",
+                        "People Groups",
+                        "Groups",
+                        "23 people groups from Scripture",
+                        23,
+                        ItemBadge::Groups,
+                    )),
+                    _ => None,
+                }
+            }
         }
     }
 
-    // ── Conversions ──────────────────────────────────────────────
+    // ── Domain item builders ──────────────────────────────────
 
-    fn translation_to_item(t: &FreeBibleTranslation) -> StoreItem {
-        let has_strongs = t.id == "BSB" || t.id.starts_with("eng_kjv");
+    fn translation_item(t: &DomainTranslation) -> DomainStoreItem {
+        let has_strongs = matches!(t.id.as_str(), "BSB") || t.id.starts_with("eng_kjv");
         let badge = match t.id.as_str() {
-            "BSB" => Some("Interlinear".into()),
-            "eng_kjv" | "eng_kja" | "eng_web" | "eng_asv" => Some("Public domain".into()),
+            "BSB" => Some(ItemBadge::Interlinear),
+            "eng_kjv" | "eng_kja" | "eng_web" | "eng_asv" => Some(ItemBadge::PublicDomain),
             _ => None,
         };
-        StoreItem {
-            id: t.id.clone(),
-            kind: "translation".into(),
+        DomainStoreItem {
+            id: StoreItemId::translation(&t.id),
             name: t.name.clone(),
             english_name: t.english_name.clone(),
             short_name: t.short_name.clone(),
@@ -332,88 +511,85 @@ impl Store {
                 "{} • {} books • {} verses",
                 t.language_english_name
                     .clone()
-                    .unwrap_or_else(|| t.language.clone()),
-                t.number_of_books,
-                t.total_number_of_verses
+                    .unwrap_or_else(|| t.language.as_str().to_string()),
+                t.books,
+                t.verses
             ),
             badge,
-            installed: false,
-            has_strongs,
-            book_count: t.number_of_books,
-            chapter_count: t.total_number_of_chapters,
-            verse_count: t.total_number_of_verses,
+            installed: Flag::Off,
+            has_strongs: Flag::from_bool(has_strongs),
+            books: t.books,
+            chapters: t.chapters,
+            verses: t.verses,
         }
     }
 
-    fn commentary_to_item(c: &FreeBibleCommentary) -> StoreItem {
-        StoreItem {
-            id: c.id.clone(),
-            kind: "commentary".into(),
+    fn commentary_item(c: &DomainCommentary) -> DomainStoreItem {
+        DomainStoreItem {
+            id: StoreItemId::commentary(&c.id),
             name: c.name.clone(),
             english_name: c.english_name.clone(),
             short_name: c.name.clone(),
             language: c.language.clone(),
             language_name: None,
-            description: format!(
-                "Commentary • {} books • {} chapters",
-                c.number_of_books, c.total_number_of_chapters
-            ),
-            badge: Some("Commentary".into()),
-            installed: false,
-            has_strongs: false,
-            book_count: c.number_of_books,
-            chapter_count: c.total_number_of_chapters,
-            verse_count: c.total_number_of_verses,
+            description: format!("Commentary • {} books • {} chapters", c.books, c.chapters),
+            badge: Some(ItemBadge::Commentary),
+            installed: Flag::Off,
+            has_strongs: Flag::Off,
+            books: c.books,
+            chapters: c.chapters,
+            verses: c.verses,
         }
     }
 
-    fn dataset_to_item(d: &FreeBibleDataset) -> StoreItem {
+    fn dataset_item(d: &DomainDataset) -> DomainStoreItem {
         let badge = match d.id.as_str() {
-            "stepbible-lexicon" => Some("Lexicon".into()),
-            "bsb-interlinear" => Some("Interlinear".into()),
-            _ => Some("Dataset".into()),
+            "stepbible-lexicon" => ItemBadge::Lexicon,
+            "bsb-interlinear" => ItemBadge::Interlinear,
+            _ => ItemBadge::Dataset,
         };
-        StoreItem {
-            id: d.id.clone(),
-            kind: "dataset".into(),
+        DomainStoreItem {
+            id: StoreItemId::dataset(&d.id),
             name: d.name.clone(),
             english_name: d.english_name.clone(),
             short_name: d.name.clone(),
             language: d.language.clone(),
             language_name: None,
-            description: format!("Study dataset • {} books", d.total_number_of_books),
-            badge,
-            installed: false,
-            has_strongs: d.id == "stepbible-lexicon",
-            book_count: d.total_number_of_books,
-            chapter_count: 0,
-            verse_count: 0,
+            description: format!("Study dataset • {} books", d.books),
+            badge: Some(badge),
+            installed: Flag::Off,
+            has_strongs: Flag::from_bool(d.id == "stepbible-lexicon"),
+            books: d.books,
+            chapters: ChapterCount::ZERO,
+            verses: VerseCount::ZERO,
         }
     }
 
-    // ── Facet builder ────────────────────────────────────────────
+    // ── Facets ──────────────────────────────────────────────────
 
     fn build_facets(
-        translations: &[FreeBibleTranslation],
-        commentaries: &[FreeBibleCommentary],
+        translations: &[DomainTranslation],
+        commentaries: &[DomainCommentary],
     ) -> Vec<LanguageFacet> {
         let mut map: HashMap<String, (String, String, i32, i32)> = HashMap::new();
         for t in translations {
             let name = t
                 .language_name
                 .clone()
-                .unwrap_or_else(|| t.language.clone());
+                .unwrap_or_else(|| t.language.as_str().to_string());
             let eng = t
                 .language_english_name
                 .clone()
                 .unwrap_or_else(|| name.clone());
-            let e = map.entry(t.language.clone()).or_insert((name, eng, 0, 0));
+            let e = map
+                .entry(t.language.as_str().to_string())
+                .or_insert((name, eng, 0, 0));
             e.2 += 1;
         }
         for c in commentaries {
-            let e = map.entry(c.language.clone()).or_insert((
-                c.language.clone(),
-                c.language.clone(),
+            let e = map.entry(c.language.as_str().to_string()).or_insert((
+                c.language.as_str().to_string(),
+                c.language.as_str().to_string(),
                 0,
                 0,
             ));
@@ -431,5 +607,32 @@ impl Store {
             .collect();
         out.sort_by(|a, b| a.english_name.cmp(&b.english_name));
         out
+    }
+}
+
+// ── Helpers ────────────────────────────────────────────────────
+
+fn entity_set_item(
+    id: &str,
+    name: &str,
+    short_name: &str,
+    description: &str,
+    count: i32,
+    badge: ItemBadge,
+) -> DomainStoreItem {
+    DomainStoreItem {
+        id: StoreItemId::entity_set(id),
+        name: name.into(),
+        english_name: name.into(),
+        short_name: short_name.into(),
+        language: LanguageCode("eng".into()),
+        language_name: Some("English".into()),
+        description: description.into(),
+        badge: Some(badge),
+        installed: Flag::Off,
+        has_strongs: Flag::Off,
+        books: BookCount::from_raw(count),
+        chapters: ChapterCount::ZERO,
+        verses: VerseCount::ZERO,
     }
 }

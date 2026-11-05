@@ -1,5 +1,8 @@
+
+use xbible_engine::engines::freebible_engine::error::FreeBibleError;
+use xbible_engine::engines::freebible_engine::install::EntityKind;
 use xbible_engine::engines::freebible_engine::BibleClient;
-use xbible_engine::engines::freebible_engine::store_api::FreeBibleStore;
+use xbible_engine::engines::xbible_engine::engine::XBibleEngine;
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -10,11 +13,11 @@ const DATASET: &str = "theographic";
 fn install_kind<F>(
     client: &BibleClient,
     conn: &mut rusqlite::Connection,
-    kind: xbible_engine::engines::freebible_engine::install::EntityKind,
+    kind: EntityKind,
     label: &str,
     step_percent: f64,
     mut on_progress: F,
-) -> Result<String, xbible_engine::engines::freebible_engine::utils::FreeBibleError>
+) -> Result<String, FreeBibleError>
 where
     F: FnMut(f64, String),
 {
@@ -47,18 +50,22 @@ where
 }
 
 fn main() {
-    let client = BibleClient::new();
-    use xbible_engine::engines::freebible_engine::install::EntityKind;
+    xbible_engine::init_logging();
 
-    // ── Fresh DB ─────────────────────────────────────────────────
+    let client = BibleClient::new();
+
+    // ── Fresh DB ────────────────────────────────────────────────
     let db_path = std::env::temp_dir().join("entity_smoke.db");
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
     let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
     let db_path_str = db_path.to_string_lossy().into_owned();
+
+    // ── Install directly into the raw DB ────────────────────────
+    // This part stays the same — installs are called from Rust
+    // code paths, not the FFI surface.
     let mut conn = xbible_engine::db::open(&db_path_str).expect("open db");
 
-    // ── Install all four entity kinds ────────────────────────────
     println!("=== Installing Bible Characters (3067 people) ===");
     let _ = install_kind(&client, &mut conn, EntityKind::Person, "people", 10.0, |pct, msg| {
         println!("  [{:>5.1}%] {}", pct, msg);
@@ -79,65 +86,69 @@ fn main() {
         println!("  [{:>5.1}%] {}", pct, msg);
     });
 
-    // ── Fresh store on the same DB, for reads ────────────────────
-    let store = FreeBibleStore::new();
-    store.set_db_path(db_path_str.clone()).expect("set db path");
+    // Close the direct connection before opening the engine.
+    drop(conn);
 
-    // ── Row counts + install state ───────────────────────────────
+    // ── Open through the engine, get the reader ─────────────────
+    let engine = XBibleEngine::new();
+    engine
+        .freebible_engine
+        .set_db_path(db_path_str.clone())
+        .expect("engine open failed");
+    let reader = engine.freebible_engine.reader();
+
+    // ── Install state ───────────────────────────────────────────
     println!("\n=== Install state ===");
     for kind in ["person", "event", "place", "group"] {
-        let installed = store.is_entity_set_installed(DATASET.into(), kind.into());
+        let installed = reader.is_entity_set_installed(DATASET.into(), kind.into());
         println!("  {}: installed={}", kind, installed);
     }
 
-    // ── Browse: people ───────────────────────────────────────────
+    // ── Browse: people ─────────────────────────────────────────
     println!("\n=== Browse people ===");
-    let first_people = store.list_people(DATASET.into(), 0, 5, None);
+    let first_people = reader.list_people(DATASET.into(), 0, 5, None);
     println!("  first 5 people:");
     for p in &first_people {
         println!("    {} ({}) refs={}", p.name, p.id, p.number_of_references);
     }
 
-    let search = store.list_people(DATASET.into(), 0, 10, Some("joseph".into()));
+    let search = reader.list_people(DATASET.into(), 0, 10, Some("joseph".into()));
     println!("\n  search 'joseph' → {} results:", search.len());
     for p in &search {
         println!("    {} ({})", p.name, p.id);
     }
 
-    // ── Browse: events ───────────────────────────────────────────
+    // ── Browse: events ─────────────────────────────────────────
     println!("\n=== Browse events ===");
-    let some_events = store.list_events(DATASET.into(), 0, 5, None);
+    let some_events = reader.list_events(DATASET.into(), 0, 5, None);
     for e in &some_events {
-        println!(
-            "    {} ({}) start={:?}",
-            e.name, e.id, e.start_date
-        );
+        println!("    {} ({}) start={:?}", e.name, e.id, e.start_date);
     }
 
-    // ── Browse: places ───────────────────────────────────────────
+    // ── Browse: places ─────────────────────────────────────────
     println!("\n=== Browse places ===");
-    let some_places = store.list_places(DATASET.into(), 0, 5, None);
+    let some_places = reader.list_places(DATASET.into(), 0, 5, None);
     for p in &some_places {
         println!("    {} ({})", p.name, p.id);
     }
 
-    // ── Browse: groups ───────────────────────────────────────────
+    // ── Browse: groups ─────────────────────────────────────────
     println!("\n=== Browse groups ===");
-    let all_groups = store.list_groups(DATASET.into(), 0, 50, None);
+    let all_groups = reader.list_groups(DATASET.into(), 0, 50, None);
     for g in &all_groups {
         println!("    {} ({})", g.name, g.id);
     }
 
-    // ── Global search ────────────────────────────────────────────
+    // ── Global search ──────────────────────────────────────────
     println!("\n=== Global search 'jesus' ===");
-    let hits = store.search_entities(DATASET.into(), "jesus".into());
+    let hits = reader.search_entities(DATASET.into(), "jesus".into());
     for h in hits.iter().take(10) {
         println!("    {} ({})", h.name, h.id);
     }
 
-    // ── Person detail: Joseph ────────────────────────────────────
+    // ── Person detail: Joseph ───────────────────────────────────
     println!("\n=== Joseph (joseph_1710) ===");
-    let Some(joseph) = store.get_person(DATASET.into(), "joseph_1710".into()) else {
+    let Some(joseph) = reader.get_person(DATASET.into(), "joseph_1710".into()) else {
         println!("  Joseph not found");
         return;
     };
@@ -187,19 +198,13 @@ fn main() {
         "  death_place: {:?}",
         joseph.death_place.iter().map(|r| &r.name).collect::<Vec<_>>()
     );
-    println!(
-        "  events (forward): {} refs",
-        joseph.events.len()
-    );
-    println!(
-        "  events (reverse): {} refs",
-        joseph.referenced_by_events.len()
-    );
+    println!("  events (forward): {} refs", joseph.events.len());
+    println!("  events (reverse): {} refs", joseph.referenced_by_events.len());
     println!("  verses: {} ranges", joseph.verses.len());
 
-    // ── Event detail: 7 years of famine ──────────────────────────
+    // ── Event detail ───────────────────────────────────────────
     println!("\n=== 7 years of famine (7-years-of-famine_113) ===");
-    let Some(famine) = store.get_event(DATASET.into(), "7-years-of-famine_113".into()) else {
+    let Some(famine) = reader.get_event(DATASET.into(), "7-years-of-famine_113".into()) else {
         println!("  Event not found");
         return;
     };
@@ -214,19 +219,13 @@ fn main() {
         println!("    … {} more", famine.participants.len() - 5);
     }
     println!("  locations: {}", famine.locations.len());
-    println!(
-        "  predecessor: {:?}",
-        famine.predecessor.as_ref().map(|r| &r.name)
-    );
-    println!(
-        "  successor: {:?}",
-        famine.successor.as_ref().map(|r| &r.name)
-    );
+    println!("  predecessor: {:?}", famine.predecessor.as_ref().map(|r| &r.name));
+    println!("  successor: {:?}", famine.successor.as_ref().map(|r| &r.name));
     println!("  verses: {} ranges", famine.verses.len());
 
-    // ── Place detail: Nazareth ───────────────────────────────────
+    // ── Place detail ───────────────────────────────────────────
     println!("\n=== Nazareth (nazareth_878) ===");
-    let Some(nazareth) = store.get_place(DATASET.into(), "nazareth_878".into()) else {
+    let Some(nazareth) = reader.get_place(DATASET.into(), "nazareth_878".into()) else {
         println!("  Place not found");
         return;
     };
@@ -244,19 +243,13 @@ fn main() {
     if nazareth.events.len() > 5 {
         println!("    … {} more", nazareth.events.len() - 5);
     }
-    println!(
-        "  people_born_here: {}",
-        nazareth.people_born_here.len()
-    );
-    println!(
-        "  people_died_here: {}",
-        nazareth.people_died_here.len()
-    );
+    println!("  people_born_here: {}", nazareth.people_born_here.len());
+    println!("  people_died_here: {}", nazareth.people_died_here.len());
     println!("  verses: {} ranges", nazareth.verses.len());
 
-    // ── Group detail ─────────────────────────────────────────────
+    // ── Group detail ───────────────────────────────────────────
     println!("\n=== Tribe of Joseph ===");
-    if let Some(group) = store.get_group(DATASET.into(), "tribe-of-joseph".into()) {
+    if let Some(group) = reader.get_group(DATASET.into(), "tribe-of-joseph".into()) {
         println!("  name: {}", group.name);
         println!("  members: {}", group.members.len());
         for m in group.members.iter().take(5) {
@@ -270,46 +263,37 @@ fn main() {
         println!("  verses: {} ranges", group.verses.len());
     }
 
-    // ── Graph walk: Joseph → event → participants ────────────────
+    // ── Graph walk ─────────────────────────────────────────────
     println!("\n=== Bidirectional graph walk ===");
     if let Some(first_event) = joseph.events.first() {
-        println!(
-            "  Joseph → event: {} ({})",
-            first_event.name, first_event.id
-        );
-        if let Some(ev) = store.get_event(DATASET.into(), first_event.id.clone()) {
+        println!("  Joseph → event: {} ({})", first_event.name, first_event.id);
+        if let Some(ev) = reader.get_event(DATASET.into(), first_event.id.clone()) {
             println!("  event → {} participants", ev.participants.len());
             println!("  event → {} verse ranges", ev.verses.len());
         }
     }
 
-    // ── get_related with relation filter ─────────────────────────
+    // ── get_related with relation filter ───────────────────────
     println!("\n=== get_related (filtered) ===");
-    let joseph_participates_in = store.get_related(
+    let joseph_participates_in = reader.get_related(
         DATASET.into(),
         "person".into(),
         "joseph_1710".into(),
         Some("participated_in".into()),
     );
-    println!(
-        "  Joseph participated_in: {} events",
-        joseph_participates_in.len()
-    );
+    println!("  Joseph participated_in: {} events", joseph_participates_in.len());
 
-    let joseph_all = store.get_related(
+    let joseph_all = reader.get_related(
         DATASET.into(),
         "person".into(),
         "joseph_1710".into(),
         None,
     );
-    println!(
-        "  Joseph all outgoing edges: {} (family + events + groups + places)",
-        joseph_all.len()
-    );
+    println!("  Joseph all outgoing edges: {}", joseph_all.len());
 
-    // ── get_verse_refs explicitly ────────────────────────────────
+    // ── get_verse_refs explicitly ──────────────────────────────
     println!("\n=== get_verse_refs ===");
-    let joseph_verses = store.get_verse_refs(
+    let joseph_verses = reader.get_verse_refs(
         DATASET.into(),
         "person".into(),
         "joseph_1710".into(),
@@ -321,36 +305,25 @@ fn main() {
             v.book,
             v.chapter,
             v.verse,
-            v.end_verse
-                .map(|e| format!("-{e}"))
-                .unwrap_or_default()
+            v.end_verse.map(|e| format!("-{e}")).unwrap_or_default()
         );
     }
 
-    // ── The killer query: who's in this verse ────────────────────
+    // ── The killer query: who's in this verse ─────────────────
     println!("\n=== Entities in GEN 41:54 ===");
-    let entities = store.get_entities_for_verse(
-        DATASET.into(),
-        "GEN".into(),
-        41,
-        54,
-    );
+    let entities = reader.get_entities_for_verse(DATASET.into(), "GEN".into(), 41, 54);
     for e in &entities {
         println!("  {}: {} ({})", e.kind, e.name, e.id);
     }
 
     println!("\n=== Entities in JHN 3:16 ===");
-    let entities = store.get_entities_for_verse(
-        DATASET.into(),
-        "JHN".into(),
-        3,
-        16,
-    );
+    let entities = reader.get_entities_for_verse(DATASET.into(), "JHN".into(), 3, 16);
     for e in &entities {
         println!("  {}: {} ({})", e.kind, e.name, e.id);
     }
 
-    // ── Cleanup ──────────────────────────────────────────────────
+    // ── Cleanup ────────────────────────────────────────────────
+    drop(engine);
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
     let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));

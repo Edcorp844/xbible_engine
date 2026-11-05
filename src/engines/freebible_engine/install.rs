@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::engines::freebible_engine::client::{BibleClient, FreeBibleChapter, FreeBibleComplete};
-use crate::engines::freebible_engine::utils::{FreeBibleError, InstallProgress};
+use crate::engines::freebible_engine::error::FreeBibleError;
+use crate::engines::freebible_engine::utils::InstallProgress;
 
 const WORKERS: usize = 8;
 const CHANNEL_CAPACITY: usize = 16;
@@ -25,6 +26,15 @@ impl EntityKind {
             EntityKind::Event => "event",
             EntityKind::Place => "place",
             EntityKind::Group => "group",
+        }
+    }
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "person" => Some(Self::Person),
+            "event" => Some(Self::Event),
+            "place" => Some(Self::Place),
+            "group" => Some(Self::Group),
+            _ => None,
         }
     }
 }
@@ -59,10 +69,8 @@ fn write_person(
         .get("alsoCalled")
         .and_then(|v| v.as_array())
         .map(|arr| {
-            serde_json::to_string(
-                &arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>(),
-            )
-            .unwrap_or_default()
+            serde_json::to_string(&arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+                .unwrap_or_default()
         });
     let is_proper_name = person
         .get("isProperName")
@@ -73,7 +81,11 @@ fn write_person(
     let death_year = person.get("deathYear").and_then(|v| v.as_i64()) as Option<i64>;
     let min_year = person.get("minYear").and_then(|v| v.as_i64()) as Option<i64>;
     let max_year = person.get("maxYear").and_then(|v| v.as_i64()) as Option<i64>;
-    let description = join_description(person.get("description").unwrap_or(&serde_json::Value::Null));
+    let description = join_description(
+        person
+            .get("description")
+            .unwrap_or(&serde_json::Value::Null),
+    );
 
     tx.execute(
         "INSERT OR REPLACE INTO people (
@@ -81,8 +93,18 @@ fn write_person(
             birth_year, death_year, min_year, max_year, description, raw_json
          ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
         params![
-            dataset_id, id, name, also_called, is_proper_name as i32, gender,
-            birth_year, death_year, min_year, max_year, description, raw_json,
+            dataset_id,
+            id,
+            name,
+            also_called,
+            is_proper_name as i32,
+            gender,
+            birth_year,
+            death_year,
+            min_year,
+            max_year,
+            description,
+            raw_json,
         ],
     )
     .map_err(|e| FreeBibleError::Generic {
@@ -103,17 +125,30 @@ fn write_event(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    let name = event.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+    let name = event
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     let start_date = event.get("startDate").and_then(|v| v.as_str());
     let end_date = event.get("endDate").and_then(|v| v.as_str());
     let duration = event.get("duration").and_then(|v| v.as_str());
-    let description = join_description(event.get("description").unwrap_or(&serde_json::Value::Null));
+    let description =
+        join_description(event.get("description").unwrap_or(&serde_json::Value::Null));
 
     tx.execute(
         "INSERT OR REPLACE INTO events (
             dataset_id, id, name, start_date, end_date, duration, description, raw_json
          ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-        params![dataset_id, id, name, start_date, end_date, duration, description, raw_json],
+        params![
+            dataset_id,
+            id,
+            name,
+            start_date,
+            end_date,
+            duration,
+            description,
+            raw_json
+        ],
     )
     .map_err(|e| FreeBibleError::Generic {
         error_message: format!("events insert: {e}"),
@@ -133,13 +168,17 @@ fn write_place(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    let name = place.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+    let name = place
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     let kjv_name = place.get("kjvName").and_then(|v| v.as_str());
     let esv_name = place.get("esvName").and_then(|v| v.as_str());
     let feature_type = place.get("featureType").and_then(|v| v.as_str());
     let latitude = place.get("latitude").and_then(|v| v.as_f64());
     let longitude = place.get("longitude").and_then(|v| v.as_f64());
-    let description = join_description(place.get("description").unwrap_or(&serde_json::Value::Null));
+    let description =
+        join_description(place.get("description").unwrap_or(&serde_json::Value::Null));
 
     tx.execute(
         "INSERT OR REPLACE INTO places (
@@ -147,8 +186,16 @@ fn write_place(
             latitude, longitude, description, raw_json
          ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         params![
-            dataset_id, id, name, kjv_name, esv_name, feature_type,
-            latitude, longitude, description, raw_json,
+            dataset_id,
+            id,
+            name,
+            kjv_name,
+            esv_name,
+            feature_type,
+            latitude,
+            longitude,
+            description,
+            raw_json,
         ],
     )
     .map_err(|e| FreeBibleError::Generic {
@@ -169,8 +216,12 @@ fn write_group(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    let name = group.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-    let description = join_description(group.get("description").unwrap_or(&serde_json::Value::Null));
+    let name = group
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let description =
+        join_description(group.get("description").unwrap_or(&serde_json::Value::Null));
 
     tx.execute(
         "INSERT OR REPLACE INTO people_groups (
