@@ -188,6 +188,109 @@ const MIGRATIONS: &[M<'_>] = &[
         );
         "#,
     ),
+
+        // ── v5: Theographic entity graph ──────────────────────────────
+    M::up(
+        r#"
+        -- ── Entity tables ──────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS people (
+            dataset_id TEXT NOT NULL,
+            id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            also_called TEXT,
+            is_proper_name INTEGER NOT NULL DEFAULT 0,
+            gender TEXT,
+            birth_year INTEGER,
+            death_year INTEGER,
+            min_year INTEGER,
+            max_year INTEGER,
+            description TEXT,
+            raw_json TEXT NOT NULL,
+            fetched_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            PRIMARY KEY (dataset_id, id)
+        );
+
+        CREATE TABLE IF NOT EXISTS events (
+            dataset_id TEXT NOT NULL,
+            id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            start_date TEXT,
+            end_date TEXT,
+            duration TEXT,
+            description TEXT,
+            raw_json TEXT NOT NULL,
+            fetched_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            PRIMARY KEY (dataset_id, id)
+        );
+
+        CREATE TABLE IF NOT EXISTS places (
+            dataset_id TEXT NOT NULL,
+            id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            kjv_name TEXT,
+            esv_name TEXT,
+            feature_type TEXT,
+            latitude REAL,
+            longitude REAL,
+            description TEXT,
+            raw_json TEXT NOT NULL,
+            fetched_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            PRIMARY KEY (dataset_id, id)
+        );
+
+        CREATE TABLE IF NOT EXISTS people_groups (
+            dataset_id TEXT NOT NULL,
+            id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            raw_json TEXT NOT NULL,
+            fetched_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            PRIMARY KEY (dataset_id, id)
+        );
+
+        -- ── Entity → entity graph (bidirectional, queryable both ways) ─
+        CREATE TABLE IF NOT EXISTS entity_refs (
+            dataset_id TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            relation TEXT NOT NULL,
+            target_kind TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            target_name TEXT,
+            PRIMARY KEY (dataset_id, source_kind, source_id, relation, target_kind, target_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_entity_refs_forward
+            ON entity_refs (dataset_id, source_kind, source_id, relation);
+        CREATE INDEX IF NOT EXISTS idx_entity_refs_reverse
+            ON entity_refs (dataset_id, target_kind, target_id, relation);
+
+        -- ── Entity → Scripture graph ───────────────────────────────
+        CREATE TABLE IF NOT EXISTS entity_verse_refs (
+            dataset_id TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            book TEXT NOT NULL,
+            chapter INTEGER NOT NULL,
+            verse INTEGER NOT NULL,
+            end_verse INTEGER,
+            PRIMARY KEY (dataset_id, source_kind, source_id, book, chapter, verse)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_entity_verse_by_passage
+            ON entity_verse_refs (dataset_id, book, chapter, verse);
+
+        -- ── Per-kind install state ────────────────────────────────
+        CREATE TABLE IF NOT EXISTS entity_install_state (
+            dataset_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            installed INTEGER NOT NULL DEFAULT 0,
+            fetched_count INTEGER NOT NULL DEFAULT 0,
+            total_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (dataset_id, kind)
+        );
+        "#,
+    ),
 ];
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {
@@ -236,6 +339,8 @@ mod tests {
             "footnotes",
             "audio_timings",
             "chapter_raw",
+            "people", "events", "places", "people_groups",
+            "entity_refs", "entity_verse_refs", "entity_install_state",
         ] {
             let exists: i32 = conn
                 .query_row(

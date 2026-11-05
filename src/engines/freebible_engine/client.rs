@@ -158,6 +158,66 @@ pub struct FreeBibleCompleteChapter {
     pub raw_json: String,
 }
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct EntitySummary {
+    pub id: String,
+    pub name: String,
+    /// people only — true if it's a proper name (e.g. "Aaron", not "the priest")
+    pub is_proper_name: Option<bool>,
+    /// people only — "Male" | "Female"
+    pub gender: Option<String>,
+    /// events only — the year the event started
+    pub start_date: Option<String>,
+    pub number_of_references: i32,
+}
+
+#[derive(Deserialize)]
+struct RawEntitySummary {
+    id: String,
+    name: String,
+    #[serde(rename = "isProperName", default)]
+    is_proper_name: Option<bool>,
+    #[serde(default)]
+    gender: Option<String>,
+    #[serde(rename = "startDate", default)]
+    start_date: Option<String>,
+    #[serde(rename = "numberOfReferences", default)]
+    number_of_references: i32,
+}
+
+impl From<RawEntitySummary> for EntitySummary {
+    fn from(r: RawEntitySummary) -> Self {
+        Self {
+            id: r.id,
+            name: r.name,
+            is_proper_name: r.is_proper_name,
+            gender: r.gender,
+            start_date: r.start_date,
+            number_of_references: r.number_of_references,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct PeopleListResponse {
+    people: Vec<RawEntitySummary>,
+}
+
+#[derive(Deserialize)]
+struct EventsListResponse {
+    events: Vec<RawEntitySummary>,
+}
+
+#[derive(Deserialize)]
+struct PlacesListResponse {
+    places: Vec<RawEntitySummary>,
+}
+
+#[derive(Deserialize)]
+struct GroupsListResponse {
+    groups: Vec<RawEntitySummary>,
+}
+
 // ── Client ────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -168,37 +228,56 @@ pub struct BibleClient {
 
 impl BibleClient {
     pub fn new() -> Self {
-        let mut builder = Client::builder()
-            .http1_only()
-            .pool_max_idle_per_host(32)
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(600))
-            .tcp_keepalive(Duration::from_secs(15));
-
-        // On Android, reqwest's default rustls backend goes through
-        // `rustls-platform-verifier`, which requires a JNI handshake with an
-        // Android Context. If that handshake hasn't happened, `.build()`
-        // errors and later calls fail. Bypass it with a pre-built rustls
-        // config using webpki roots instead.
         #[cfg(target_os = "android")]
-        {
-            let mut roots = rustls::RootCertStore::empty();
+        let http = {
+            use rustls::RootCertStore;
+
+            // On Android, reqwest's default rustls backend goes through
+            // `rustls-platform-verifier`, which requires a JNI handshake with an
+            // Android Context. If that handshake hasn't happened, `.build()`
+            // errors and later calls fail. Bypass it with a pre-built rustls
+            // config using webpki roots instead.
+            let mut roots = RootCertStore::empty();
             roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
             let config = rustls::ClientConfig::builder()
                 .with_root_certificates(roots)
                 .with_no_client_auth();
-            builder = builder.use_preconfigured_tls(config);
-        }
 
-        let http = match builder.build() {
+            match Client::builder()
+                .http1_only()
+                .pool_max_idle_per_host(32)
+                .connect_timeout(Duration::from_secs(15))
+                .timeout(Duration::from_secs(600))
+                .tcp_keepalive(Duration::from_secs(15))
+                .use_preconfigured_tls(config)
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!(
+                        "BibleClient: android preconfigured client build failed ({}), \
+                     falling back to reqwest::blocking::Client::new()",
+                        e
+                    );
+                    Client::new()
+                }
+            }
+        };
+
+        #[cfg(not(target_os = "android"))]
+        let http = match Client::builder()
+            .http1_only()
+            .pool_max_idle_per_host(32)
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(600))
+            .tcp_keepalive(Duration::from_secs(15))
+            .build()
+        {
             Ok(c) => c,
             Err(e) => {
-                // Should not happen once the Android path is preconfigured,
-                // but never panic on the FFI boundary — fall back to a plain
-                // client so the app still runs.
                 log::warn!(
-                    "BibleClient: preconfigured client build failed ({}), \
-                     falling back to reqwest::blocking::Client::new()",
+                    "BibleClient: client build failed ({}), \
+                 falling back to reqwest::blocking::Client::new()",
                     e
                 );
                 Client::new()
@@ -538,6 +617,42 @@ impl BibleClient {
         chapter: u32,
     ) -> Result<serde_json::Value, String> {
         self.get_json(&format!("d/{}/{}/{}.json", dataset, book, chapter))
+    }
+
+    pub fn dataset_people_list(&self, dataset: &str) -> Result<Vec<EntitySummary>, String> {
+        let data: PeopleListResponse = self.get_json(&format!("d/{}/people.json", dataset))?;
+        Ok(data.people.into_iter().map(Into::into).collect())
+    }
+
+    pub fn dataset_events_list(&self, dataset: &str) -> Result<Vec<EntitySummary>, String> {
+        let data: EventsListResponse = self.get_json(&format!("d/{}/events.json", dataset))?;
+        Ok(data.events.into_iter().map(Into::into).collect())
+    }
+
+    pub fn dataset_places_list(&self, dataset: &str) -> Result<Vec<EntitySummary>, String> {
+        let data: PlacesListResponse = self.get_json(&format!("d/{}/places.json", dataset))?;
+        Ok(data.places.into_iter().map(Into::into).collect())
+    }
+
+    pub fn dataset_groups_list(&self, dataset: &str) -> Result<Vec<EntitySummary>, String> {
+        let data: GroupsListResponse = self.get_json(&format!("d/{}/groups.json", dataset))?;
+        Ok(data.groups.into_iter().map(Into::into).collect())
+    }
+
+    pub fn dataset_person(&self, dataset: &str, id: &str) -> Result<serde_json::Value, String> {
+        self.get_json(&format!("d/{}/people/{}.json", dataset, id))
+    }
+
+    pub fn dataset_event(&self, dataset: &str, id: &str) -> Result<serde_json::Value, String> {
+        self.get_json(&format!("d/{}/events/{}.json", dataset, id))
+    }
+
+    pub fn dataset_place(&self, dataset: &str, id: &str) -> Result<serde_json::Value, String> {
+        self.get_json(&format!("d/{}/places/{}.json", dataset, id))
+    }
+
+    pub fn dataset_group(&self, dataset: &str, id: &str) -> Result<serde_json::Value, String> {
+        self.get_json(&format!("d/{}/groups/{}.json", dataset, id))
     }
 
     pub fn lexicon_entry(

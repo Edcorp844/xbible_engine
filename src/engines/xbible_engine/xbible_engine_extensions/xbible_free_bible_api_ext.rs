@@ -1,7 +1,11 @@
+use crate::engines::freebible_engine::EntitySummary;
 use crate::engines::freebible_engine::client::{
     FreeBibleBook, FreeBibleChapterItem, FreeBibleFootnote, FreeBibleVerse,
 };
 use crate::engines::freebible_engine::store::{LanguageFacet, StoreItem, StoreShelf};
+use crate::engines::freebible_engine::store_api::{
+    EntityRef, EventDetail, GroupDetail, PersonDetail, PlaceDetail, VerseRange,
+};
 use crate::engines::freebible_engine::utils::{FreeBibleError, FreeBibleTaskStatus};
 use crate::engines::xbible_engine::engine::XBibleEngine;
 
@@ -42,7 +46,7 @@ impl XBibleEngine {
         self.free_bible_store.item(id, kind)
     }
 
-    // ── Install / uninstall ──────────────────────────────────────
+    // ── Install / uninstall: translations ────────────────────────
 
     /// Start installing a translation. Returns a task ID for `poll_free_bible_task`.
     pub fn install_free_bible_translation(
@@ -62,6 +66,24 @@ impl XBibleEngine {
 
     pub fn is_free_bible_installed(&self, translation_id: String) -> bool {
         self.free_bible_store.is_installed(translation_id)
+    }
+
+    // ── Install: entity sets (people / events / places / groups) ─
+
+    /// Start installing an entity set.
+    /// `kind` is one of "person" | "event" | "place" | "group".
+    /// Returns a task ID for `poll_free_bible_task`.
+    pub fn install_free_bible_entity_set(
+        &self,
+        dataset_id: String,
+        kind: String,
+    ) -> Result<String, FreeBibleError> {
+        self.free_bible_store.install_entity_set(dataset_id, kind)
+    }
+
+    pub fn is_free_bible_entity_set_installed(&self, dataset_id: String, kind: String) -> bool {
+        self.free_bible_store
+            .is_entity_set_installed(dataset_id, kind)
     }
 
     // ── Task polling (this is how the UI gets install progress) ──
@@ -86,7 +108,7 @@ impl XBibleEngine {
         self.free_bible_store.list_tasks()
     }
 
-    // ── Read path ────────────────────────────────────────────────
+    // ── Read path: translation content ───────────────────────────
 
     pub fn free_bible_get_books(&self, translation_id: String) -> Vec<FreeBibleBook> {
         self.free_bible_store.get_books(translation_id)
@@ -131,5 +153,116 @@ impl XBibleEngine {
     ) -> Vec<FreeBibleFootnote> {
         self.free_bible_store
             .get_footnotes(translation_id, book_id, chapter)
+    }
+
+    // ── Read path: entity detail ─────────────────────────────────
+
+    pub fn free_bible_get_person(&self, dataset_id: String, id: String) -> Option<PersonDetail> {
+        self.free_bible_store.get_person(dataset_id, id)
+    }
+
+    pub fn free_bible_get_event(&self, dataset_id: String, id: String) -> Option<EventDetail> {
+        self.free_bible_store.get_event(dataset_id, id)
+    }
+
+    pub fn free_bible_get_place(&self, dataset_id: String, id: String) -> Option<PlaceDetail> {
+        self.free_bible_store.get_place(dataset_id, id)
+    }
+
+    pub fn free_bible_get_group(&self, dataset_id: String, id: String) -> Option<GroupDetail> {
+        self.free_bible_store.get_group(dataset_id, id)
+    }
+
+    // ── Read path: entity browse + search ────────────────────────
+
+    pub fn free_bible_list_people(
+        &self,
+        dataset_id: String,
+        offset: i32,
+        limit: i32,
+        query: Option<String>,
+    ) -> Vec<EntitySummary> {
+        self.free_bible_store
+            .list_people(dataset_id, offset, limit, query)
+    }
+
+    pub fn free_bible_list_events(
+        &self,
+        dataset_id: String,
+        offset: i32,
+        limit: i32,
+        query: Option<String>,
+    ) -> Vec<EntitySummary> {
+        self.free_bible_store
+            .list_events(dataset_id, offset, limit, query)
+    }
+
+    pub fn free_bible_list_places(
+        &self,
+        dataset_id: String,
+        offset: i32,
+        limit: i32,
+        query: Option<String>,
+    ) -> Vec<EntitySummary> {
+        self.free_bible_store
+            .list_places(dataset_id, offset, limit, query)
+    }
+
+    pub fn free_bible_list_groups(
+        &self,
+        dataset_id: String,
+        offset: i32,
+        limit: i32,
+        query: Option<String>,
+    ) -> Vec<EntitySummary> {
+        self.free_bible_store
+            .list_groups(dataset_id, offset, limit, query)
+    }
+
+    pub fn free_bible_search_entities(
+        &self,
+        dataset_id: String,
+        query: String,
+    ) -> Vec<EntitySummary> {
+        self.free_bible_store.search_entities(dataset_id, query)
+    }
+
+    // ── Read path: graph walks ───────────────────────────────────
+
+    /// Every entity whose verse range covers `(book, chapter, verse)`.
+    /// Powers "who's in this verse" in the reader.
+    pub fn free_bible_entities_for_verse(
+        &self,
+        dataset_id: String,
+        book: String,
+        chapter: i32,
+        verse: i32,
+    ) -> Vec<EntityRef> {
+        self.free_bible_store
+            .get_entities_for_verse(dataset_id, book, chapter, verse)
+    }
+
+    /// All verse ranges for an entity.
+    pub fn free_bible_verse_refs(
+        &self,
+        dataset_id: String,
+        kind: String,
+        id: String,
+    ) -> Vec<VerseRange> {
+        self.free_bible_store.get_verse_refs(dataset_id, kind, id)
+    }
+
+    /// All entities an entity points to, filtered by relation.
+    /// E.g. `relation = Some("participant")` on an event gives its participants;
+    /// `relation = None` gives every outgoing edge.
+    pub fn free_bible_related_entities(
+        &self,
+        dataset_id: String,
+        kind: String,
+        id: String,
+        relation: Option<String>,
+    ) -> Vec<EntityRef> {
+        self.free_bible_store
+            .get_related(dataset_id, kind, id, relation)
     }
 }

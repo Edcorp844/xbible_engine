@@ -61,3 +61,32 @@ impl From<rusqlite::Error> for FreeBibleError {
         FreeBibleError::Generic { error_message: e.to_string() }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceKind {
+    /// Bible translation (BSB, KJV, WEB, etc.)
+    /// URL: /api/{id}/... or /api/{id}/complete.json
+    Translation,
+
+    /// Commentary (Adam Clarke, Tyndale, etc.)
+    /// URL: /api/c/{id}/...
+    /// No complete.json — must use per-chapter
+    Commentary,
+
+    /// Dataset (stepbible-lexicon, bsb-interlinear, open-cross-ref, theographic, etc.)
+    /// URL: /api/d/{id}/...
+    /// Has its own sub-shapes: lexicon entries vs chapter-aligned words/entities
+    Dataset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatasetKind {
+    /// Keyed by Strong's number. Install by iterating lexicon entries.
+    Lexicon,
+    /// Chapter-aligned words. Install alongside the translation it belongs to.
+    Interlinear,
+    /// Chapter-aligned entities (people/places/events).
+    Entities,
+    /// Unknown — skip install.
+    Unsupported,
+}
