@@ -29,4 +29,9 @@ impl XBibleEngine {
             freebible_engine: FreeBibleEngine::new(),
         })
     }
+
+    /// The FreeBible sub-engine (store + reader).
+    pub fn freebible(&self) -> Arc<FreeBibleEngine> {
+        self.freebible_engine.clone()
+    }
 }
