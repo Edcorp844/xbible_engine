@@ -6,8 +6,8 @@ use crate::engines::freebible_engine::client::{
     FreeBibleCommentary, FreeBibleDataset, FreeBibleTranslation,
 };
 use crate::engines::freebible_engine::values::{
-    BookCount, ChapterCount, Flag, LanguageCode, License, LicenseNotes, LicenseUrl,
-    RawJson, TextDirection, VerseCount,
+    BookCount, ChapterCount, Flag, LanguageCode, License, LicenseNotes, LicenseUrl, RawJson,
+    TextDirection, VerseCount,
 };
 
 // ── Domain types ────────────────────────────────────────────────
@@ -172,19 +172,36 @@ impl From<DomainDataset> for FreeBibleDataset {
 }
 
 // ── Save ────────────────────────────────────────────────────────
+// ── Save ────────────────────────────────────────────────────────
 
 pub fn save_translations(
     conn: &Connection,
     items: &[FreeBibleTranslation],
 ) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
-        "INSERT OR REPLACE INTO translations (
+        "INSERT INTO translations (
             id, name, english_name, short_name, language,
             language_name, language_english_name, text_direction,
             number_of_books, total_number_of_chapters, total_number_of_verses,
             installed, has_strongs,
             license_url, license_notes, raw_json
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+         ON CONFLICT(id) DO UPDATE SET
+            name                     = excluded.name,
+            english_name             = excluded.english_name,
+            short_name               = excluded.short_name,
+            language                 = excluded.language,
+            language_name            = excluded.language_name,
+            language_english_name    = excluded.language_english_name,
+            text_direction           = excluded.text_direction,
+            number_of_books          = excluded.number_of_books,
+            total_number_of_chapters = excluded.total_number_of_chapters,
+            total_number_of_verses   = excluded.total_number_of_verses,
+            has_strongs              = excluded.has_strongs,
+            license_url              = excluded.license_url,
+            license_notes            = excluded.license_notes,
+            raw_json                 = excluded.raw_json",
+        // NOTE: `installed` is deliberately NOT in the DO UPDATE SET list.
     )?;
     for t in items {
         let has_strongs = matches!(t.id.as_str(), "BSB") || t.id.starts_with("eng_kjv");
@@ -201,7 +218,7 @@ pub fn save_translations(
             t.number_of_books,
             t.total_number_of_chapters,
             t.total_number_of_verses,
-            Flag::Off.as_sql_int(),
+            Flag::Off.as_sql_int(), // inserted only on new rows
             Flag::from_bool(has_strongs).as_sql_int(),
             t.license_url,
             t.license_notes,
@@ -211,16 +228,23 @@ pub fn save_translations(
     Ok(())
 }
 
-pub fn save_commentaries(
-    conn: &Connection,
-    items: &[FreeBibleCommentary],
-) -> rusqlite::Result<()> {
+pub fn save_commentaries(conn: &Connection, items: &[FreeBibleCommentary]) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
-        "INSERT OR REPLACE INTO commentaries (
+        "INSERT INTO commentaries (
             id, name, english_name, language, license_url, license_notes,
             number_of_books, total_number_of_chapters, total_number_of_verses,
             installed, raw_json
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+         ON CONFLICT(id) DO UPDATE SET
+            name                     = excluded.name,
+            english_name             = excluded.english_name,
+            language                 = excluded.language,
+            license_url              = excluded.license_url,
+            license_notes            = excluded.license_notes,
+            number_of_books          = excluded.number_of_books,
+            total_number_of_chapters = excluded.total_number_of_chapters,
+            total_number_of_verses   = excluded.total_number_of_verses,
+            raw_json                 = excluded.raw_json",
     )?;
     for c in items {
         stmt.execute(params![
@@ -240,15 +264,20 @@ pub fn save_commentaries(
     Ok(())
 }
 
-pub fn save_datasets(
-    conn: &Connection,
-    items: &[FreeBibleDataset],
-) -> rusqlite::Result<()> {
+pub fn save_datasets(conn: &Connection, items: &[FreeBibleDataset]) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
-        "INSERT OR REPLACE INTO datasets (
+        "INSERT INTO datasets (
             id, name, english_name, language, license_url, license_notes,
             total_number_of_books, installed, raw_json
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+         ON CONFLICT(id) DO UPDATE SET
+            name                 = excluded.name,
+            english_name         = excluded.english_name,
+            language             = excluded.language,
+            license_url          = excluded.license_url,
+            license_notes        = excluded.license_notes,
+            total_number_of_books = excluded.total_number_of_books,
+            raw_json             = excluded.raw_json",
     )?;
     for d in items {
         stmt.execute(params![
