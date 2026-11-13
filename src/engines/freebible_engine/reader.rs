@@ -1,9 +1,8 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::engines::freebible_engine::client::{EntitySummary, FreeBibleBook, FreeBibleFootnote};
 use crate::engines::freebible_engine::error::FreeBibleError;
-
 
 // ── UniFFI Data Models ─────────────────────────────────────────
 
@@ -144,7 +143,6 @@ pub struct GroupDetail {
     pub located_at: Vec<EntityRef>,
     pub verses: Vec<VerseRange>,
 }
-
 
 // ── DB Helpers ───────────────────────────────────────────────────
 
@@ -336,17 +334,26 @@ impl FreeBibleReader {
     // ── Translations & Books ─────────────────────────────────────
 
     pub fn get_installed_translations(&self) -> Vec<InstalledTranslation> {
-        let conn_arc = match self.conn.read().unwrap().clone() {
+        let conn_arc = match self.conn.read().unwrap_or_else(|p| p.into_inner()).clone() {
             Some(c) => c,
-            None => return Vec::new(),
+            None => {
+                log::warn!("get_installed_translations: reader has no connection");
+                return Vec::new();
+            }
         };
-        let conn = conn_arc.lock().unwrap();
+        let conn = conn_arc.lock().unwrap_or_else(|p| p.into_inner());
 
         let mut stmt = match conn.prepare(
-            "SELECT id, name, english_name, short_name, language, language_name, 
-                    text_direction, number_of_books, total_number_of_chapters, total_number_of_verses
-             FROM translations WHERE installed = 1 ORDER BY name"
-        ) { Ok(s) => s, Err(_) => return Vec::new() };
+            "SELECT id, name, english_name, short_name, language, language_name,
+                text_direction, number_of_books, total_number_of_chapters, total_number_of_verses
+         FROM translations WHERE installed = 1 ORDER BY name",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("get_installed_translations prepare failed: {}", e);
+                return Vec::new();
+            }
+        };
 
         let rows = stmt.query_map([], |r| {
             Ok(InstalledTranslation {
@@ -364,8 +371,19 @@ impl FreeBibleReader {
         });
 
         match rows {
-            Ok(r) => r.filter_map(|x| x.ok()).collect(),
-            Err(_) => Vec::new(),
+            Ok(r) => r
+                .filter_map(|x| match x {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        log::error!("get_installed_translations row failed: {}", e);
+                        None
+                    }
+                })
+                .collect(),
+            Err(e) => {
+                log::error!("get_installed_translations query failed: {}", e);
+                Vec::new()
+            }
         }
     }
 
@@ -1009,19 +1027,56 @@ impl FreeBibleReader {
         .unwrap_or(false)
     }
 
-    pub fn is_installed(&self, translation_id: String) -> bool {
-        let conn_arc = match self.conn.read().unwrap().clone() {
+    pub fn is_installed(&self, translation_id: String) -> Result<bool, FreeBibleError> {
+        log::info!("is_installed called with id={:?}", translation_id);
+
+        let conn_arc = match self.conn.read().unwrap_or_else(|p| p.into_inner()).clone() {
             Some(c) => c,
-            None => return false,
+            None => {
+                log::warn!("is_installed({}): reader has no connection", translation_id);
+                return Err(FreeBibleError::Generic {
+                    error_message: "reader has no connection — call setDbPath first".into(),
+                });
+            }
         };
-        let conn = conn_arc.lock().unwrap();
-        conn.query_row(
-            "SELECT installed FROM translations WHERE id = ?1",
-            rusqlite::params![translation_id],
-            |r| r.get::<_, i32>(0),
-        )
-        .map(|v| v == 1)
-        .unwrap_or(false)
+        let conn = conn_arc.lock().unwrap_or_else(|p| p.into_inner());
+
+        // First: is the id even in the catalog? A typo like "BSBcl"
+        // would otherwise look identical to "not installed".
+        let in_catalog = conn
+            .query_row(
+                "SELECT 1 FROM translations WHERE id = ?1",
+                rusqlite::params![translation_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|e| FreeBibleError::Generic {
+                error_message: format!("is_installed({translation_id}) catalog check failed: {e}"),
+            })?
+            .is_some();
+
+        if !in_catalog {
+            return Err(FreeBibleError::Generic {
+                error_message: format!(
+                    "translation {translation_id} not in catalog — call refresh() first"
+                ),
+            });
+        }
+
+        // Second: read the installed flag. The row is known to exist,
+        // so a QueryReturnedNoRows here would be a race with an uninstall
+        // that we can't meaningfully recover from.
+        let installed: i32 = conn
+            .query_row(
+                "SELECT installed FROM translations WHERE id = ?1",
+                rusqlite::params![translation_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| FreeBibleError::Generic {
+                error_message: format!("is_installed({translation_id}) query failed: {e}"),
+            })?;
+
+        Ok(installed == 1)
     }
 }
 

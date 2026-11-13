@@ -1,33 +1,101 @@
-fn temp_db_path(name: &str) -> String {
-    let mut p = std::env::temp_dir();
-    p.push(format!("xbible_test_{}_{}.db", name, std::process::id()));
-    let _ = std::fs::remove_file(&p);
-    let _ = std::fs::remove_file(format!("{}-wal", p.to_string_lossy()));
-    let _ = std::fs::remove_file(format!("{}-shm", p.to_string_lossy()));
-    p.to_string_lossy().into_owned()
+//! Integration tests for the shared SQLite layer.
+//!
+//! These live inside the crate (not in `tests/`) because `db::open`
+//! is `pub(crate)` — the raw opener is an internal escape hatch, and
+//! the public entry point is `Db::<Closed>::open`. Testing the real
+//! file-backed path, WAL, and migrations requires reaching the
+//! internal opener, so these are unit tests by Rust's definition.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use rusqlite::Connection;
+
+// ── Temp file guard ─────────────────────────────────────────────
+//
+// Every test gets a unique path (name + pid + counter) so parallel
+// `cargo test` threads never collide, and a `Drop` guard so a failed
+// assertion still removes the main DB and its WAL/SHM siblings.
+// Without the guard, a panic leaks three files into /tmp per failing
+// run; on CI that fills the disk over months.
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+struct TempDb {
+    path: String,
 }
 
-fn cleanup(path: &str) {
-    let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_file(format!("{}-wal", path));
-    let _ = std::fs::remove_file(format!("{}-shm", path));
+impl TempDb {
+    fn new(name: &str) -> Self {
+        let n = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "xbible_test_{}_{}_{}.db",
+            name,
+            std::process::id(),
+            n
+        ));
+        let path = p.to_string_lossy().into_owned();
+        let _ = Self::remove(&path);
+        Self { path }
+    }
+
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn remove(path: &str) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(format!("{path}-wal"));
+        let _ = std::fs::remove_file(format!("{path}-shm"));
+    }
 }
+
+impl Drop for TempDb {
+    fn drop(&mut self) {
+        Self::remove(&self.path);
+    }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────
+
+fn table_exists(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        [name],
+        |r| r.get::<_, i32>(0),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        [table, column],
+        |r| r.get::<_, i32>(0),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
+fn user_version(conn: &Connection) -> i32 {
+    conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap_or(0)
+}
+
+// ── Schema ──────────────────────────────────────────────────────
 
 #[test]
 fn db_creates_tables_and_sets_version() {
-    let path = temp_db_path("schema");
-    let conn = xbible_engine::db::open(&path).expect("open failed");
+    let db = TempDb::new("schema");
+    let conn = xbible_engine::db::open(db.path()).expect("open failed");
 
-    let version: i32 = conn
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .unwrap();
-    assert!(
-        version >= 1,
-        "expected at least 1 migration, got {}",
-        version
-    );
+    let v = user_version(&conn);
+    assert!(v >= 1, "expected at least one migration, got {v}");
 
-    // Every table the migrations create must exist.
+    // Every table the migrations create must exist. This list must
+    // stay in sync with `migrations::MIGRATIONS`; if you add a
+    // migration, add its tables here in the same PR.
     for table in [
         // v1: catalog
         "translations",
@@ -45,18 +113,20 @@ fn db_creates_tables_and_sets_version() {
         "footnotes",
         "audio_timings",
         "chapter_raw",
+        // v5: Theographic entity graph
+        "people",
+        "events",
+        "places",
+        "people_groups",
+        "entity_refs",
+        "entity_verse_refs",
+        "entity_install_state",
     ] {
-        let exists: i32 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-                [table],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(exists, 1, "missing table {}", table);
+        assert!(table_exists(&conn, table), "missing table {table}");
     }
 
-    // Columns added by v4 via ALTER TABLE must be present.
+    // Columns added by v4 via ALTER TABLE must be present. If a later
+    // migration adds columns, add them here.
     for (table, column) in [
         ("translations", "license_url"),
         ("translations", "license_notes"),
@@ -66,33 +136,30 @@ fn db_creates_tables_and_sets_version() {
         ("datasets", "license_notes"),
         ("datasets", "raw_json"),
     ] {
-        let has: i32 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
-                [table, column],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(has, 1, "missing column {}.{}", table, column);
+        assert!(
+            column_exists(&conn, table, column),
+            "missing column {table}.{column}"
+        );
     }
 
     drop(conn);
 
-    // Idempotent reopen — version must not change, migrations must not re-run.
-    let conn2 = xbible_engine::db::open(&path).expect("reopen failed");
-    let v2: i32 = conn2
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(v2, version, "reopen changed the version");
+    // Reopening must not re-run migrations or change the version.
+    let conn2 = xbible_engine::db::open(db.path()).expect("reopen failed");
+    assert_eq!(
+        user_version(&conn2),
+        v,
+        "reopen changed user_version — migrations re-ran"
+    );
     drop(conn2);
-
-    cleanup(&path);
 }
+
+// ── Pragmas ─────────────────────────────────────────────────────
 
 #[test]
 fn wal_mode_is_enabled() {
-    let path = temp_db_path("wal");
-    let conn = xbible_engine::db::open(&path).unwrap();
+    let db = TempDb::new("wal");
+    let conn = xbible_engine::db::open(db.path()).unwrap();
 
     let mode: String = conn
         .query_row("PRAGMA journal_mode", [], |r| r.get(0))
@@ -100,53 +167,56 @@ fn wal_mode_is_enabled() {
     assert_eq!(mode.to_lowercase(), "wal");
 
     drop(conn);
-    cleanup(&path);
 }
 
 #[test]
-fn chapter_items_survive_insert_and_query() {
-    let path = temp_db_path("chapter_items");
-    let conn = xbible_engine::db::open(&path).unwrap();
+fn busy_timeout_and_foreign_keys_are_set() {
+    // These are the two pragmas whose absence produces real incidents
+    // on Android (SQLITE_BUSY during concurrent writes) and on every
+    // platform (silent FK violations). Assert them once, here, so a
+    // refactor of `open` cannot quietly drop them.
+    let db = TempDb::new("pragmas");
+    let conn = xbible_engine::db::open(db.path()).unwrap();
 
-    // Minimal row: a heading followed by a verse, in order.
+    let timeout: i64 = conn
+        .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+        .unwrap();
+    assert!(timeout > 0, "busy_timeout must be set, got {timeout}");
+
+    let fk: i32 = conn
+        .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(fk, 1, "foreign_keys must be ON");
+
+    drop(conn);
+}
+
+// ── Content round-trip ──────────────────────────────────────────
+
+#[test]
+fn chapter_items_survive_insert_and_query() {
+    let db = TempDb::new("chapter_items");
+    let conn = xbible_engine::db::open(db.path()).unwrap();
+
+    let insert = "INSERT INTO chapter_items
+        (translation_id, book_id, chapter, position, item_type,
+         verse_number, text, poem, words_of_jesus, footnote_ids, raw_json)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)";
+
     conn.execute(
-        "INSERT INTO chapter_items
-            (translation_id, book_id, chapter, position, item_type,
-             verse_number, text, poem, words_of_jesus, footnote_ids, raw_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        insert,
         rusqlite::params![
-            "BSB",
-            "GEN",
-            1,
-            0,
-            "heading",
-            None::<i32>,
-            "The Creation",
-            0,
-            0,
-            None::<String>,
-            "{}"
+            "BSB", "GEN", 1, 0, "heading",
+            None::<i32>, "The Creation", 0, 0, None::<String>, "{}"
         ],
     )
     .unwrap();
 
     conn.execute(
-        "INSERT INTO chapter_items
-            (translation_id, book_id, chapter, position, item_type,
-             verse_number, text, poem, words_of_jesus, footnote_ids, raw_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        insert,
         rusqlite::params![
-            "BSB",
-            "GEN",
-            1,
-            1,
-            "verse",
-            Some(1),
-            "In the beginning...",
-            0,
-            1,
-            "fn1,fn2",
-            "{}"
+            "BSB", "GEN", 1, 1, "verse",
+            Some(1), "In the beginning...", 0, 1, "fn1,fn2", "{}"
         ],
     )
     .unwrap();
@@ -189,8 +259,4 @@ fn chapter_items_survive_insert_and_query() {
     assert_eq!(rows[1].1, Some(1));
     assert_eq!(rows[1].4, 1, "words_of_jesus should be 1");
     assert_eq!(rows[1].5.as_deref(), Some("fn1,fn2"));
-
-    drop(stmt);
-    drop(conn);
-    cleanup(&path);
 }

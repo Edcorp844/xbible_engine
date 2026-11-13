@@ -2,7 +2,7 @@
 
 use std::fs::{self, File};
 use std::io::Read;
-use std::path::{Path};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use chacha20poly1305::{
@@ -188,8 +188,8 @@ pub struct AudioEngine {
 #[uniffi::export]
 impl AudioEngine {
     #[uniffi::constructor]
-    pub fn new() -> Self {
-        AudioEngine {
+    pub fn new() -> Arc<Self> {
+        Arc::new(AudioEngine {
             current_tree: Mutex::new(None),
             loaded_audio_bytes: Mutex::new(None),
             playback_state: Mutex::new(InternalPlaybackState {
@@ -198,7 +198,7 @@ impl AudioEngine {
                 repeat_mode: RepeatMode::Off,
                 current_duration_ms: 0,
             }),
-        }
+        })
     }
 
     pub fn get_audio_modules_path(&self) -> String {

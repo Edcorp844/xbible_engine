@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::Connection;
 
 use crate::db::connection_state::{Closed, ConnectionState, Open};
-use crate::db::DbError;
+use crate::db::error::DbError;
 
 // ── The connection handle ───────────────────────────────────────
 

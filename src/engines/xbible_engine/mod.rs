@@ -1,2 +1,6 @@
+//! Public UniFFI facade. Feature engines are reached through this object.
+
+pub(crate) mod initialization;
 pub mod engine;
-pub mod xbible_engine_extensions;
+
+pub use engine::XBibleEngine;

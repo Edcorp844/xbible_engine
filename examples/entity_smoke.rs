@@ -1,107 +1,47 @@
+use std::thread;
+use std::time::Duration;
 
-use xbible_engine::engines::freebible_engine::error::FreeBibleError;
-use xbible_engine::engines::freebible_engine::install::EntityKind;
-use xbible_engine::engines::freebible_engine::BibleClient;
-use xbible_engine::engines::xbible_engine::engine::XBibleEngine;
-
-use std::cell::Cell;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use xbible_engine::engines::freebible_engine::utils::FreeBibleTaskState;
+use xbible_engine::XBibleEngine;
 
 const DATASET: &str = "theographic";
 
-fn install_kind<F>(
-    client: &BibleClient,
-    conn: &mut rusqlite::Connection,
-    kind: EntityKind,
-    label: &str,
-    step_percent: f64,
-    mut on_progress: F,
-) -> Result<String, FreeBibleError>
-where
-    F: FnMut(f64, String),
-{
-    let cancel = Arc::new(AtomicBool::new(false));
-    let last_pct = Cell::new(-1.0f64);
-
-    xbible_engine::engines::freebible_engine::install::install_entity_set(
-        client,
-        conn,
-        DATASET,
-        kind,
-        |p| {
-            let pct = p.fraction * 100.0;
-            let prev = last_pct.get();
-            if pct - prev >= step_percent || pct >= 100.0 {
-                last_pct.set(pct);
-                on_progress(pct, p.message);
-            }
-        },
-        cancel,
-    )
-    .map(|id| {
-        println!("  {} install result: Ok({})", label, id);
-        id
-    })
-    .map_err(|e| {
-        println!("  {} install failed: {:?}", label, e);
-        e
-    })
-}
-
 fn main() {
-    xbible_engine::init_logging();
+    let db_path = std::env::temp_dir().join(format!(
+        "entity_smoke_{}.db",
+        std::process::id()
+    ));
+    cleanup(&db_path);
 
-    let client = BibleClient::new();
-
-    // ── Fresh DB ────────────────────────────────────────────────
-    let db_path = std::env::temp_dir().join("entity_smoke.db");
-    let _ = std::fs::remove_file(&db_path);
-    let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
-    let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
-    let db_path_str = db_path.to_string_lossy().into_owned();
-
-    // ── Install directly into the raw DB ────────────────────────
-    // This part stays the same — installs are called from Rust
-    // code paths, not the FFI surface.
-    let mut conn = xbible_engine::db::open(&db_path_str).expect("open db");
-
-    println!("=== Installing Bible Characters (3067 people) ===");
-    let _ = install_kind(&client, &mut conn, EntityKind::Person, "people", 10.0, |pct, msg| {
-        println!("  [{:>5.1}%] {}", pct, msg);
-    });
-
-    println!("\n=== Installing Bible Events (450 events) ===");
-    let _ = install_kind(&client, &mut conn, EntityKind::Event, "events", 10.0, |pct, msg| {
-        println!("  [{:>5.1}%] {}", pct, msg);
-    });
-
-    println!("\n=== Installing Bible Places (1274 places) ===");
-    let _ = install_kind(&client, &mut conn, EntityKind::Place, "places", 10.0, |pct, msg| {
-        println!("  [{:>5.1}%] {}", pct, msg);
-    });
-
-    println!("\n=== Installing People Groups (23 groups) ===");
-    let _ = install_kind(&client, &mut conn, EntityKind::Group, "groups", 20.0, |pct, msg| {
-        println!("  [{:>5.1}%] {}", pct, msg);
-    });
-
-    // Close the direct connection before opening the engine.
-    drop(conn);
-
-    // ── Open through the engine, get the reader ─────────────────
     let engine = XBibleEngine::new();
     engine
-        .freebible_engine
-        .set_db_path(db_path_str.clone())
+        .freebible()
+        .set_db_path(db_path.to_string_lossy().into_owned())
         .expect("engine open failed");
-    let reader = engine.freebible_engine.reader();
+
+    let store = engine.freebible().store();
+    let reader = engine.freebible().reader();
+
+    // ── Install each entity set via the store ───────────────────
+    for (kind_str, label) in [
+        ("person", "Bible Characters (3067 people)"),
+        ("event", "Bible Events (450 events)"),
+        ("place", "Bible Places (1274 places)"),
+        ("group", "People Groups (23 groups)"),
+    ] {
+        println!("\n=== Installing {label} ===");
+        let task_id = store
+            .install_entity_set(DATASET.into(), kind_str.into())
+            .expect("install start failed");
+        wait_for_task(&store, &task_id);
+    }
 
     // ── Install state ───────────────────────────────────────────
     println!("\n=== Install state ===");
     for kind in ["person", "event", "place", "group"] {
         let installed = reader.is_entity_set_installed(DATASET.into(), kind.into());
         println!("  {}: installed={}", kind, installed);
+        assert!(installed, "{kind} should be marked installed");
     }
 
     // ── Browse: people ─────────────────────────────────────────
@@ -324,9 +264,42 @@ fn main() {
 
     // ── Cleanup ────────────────────────────────────────────────
     drop(engine);
-    let _ = std::fs::remove_file(&db_path);
-    let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
-    let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
+    cleanup(&db_path);
 
     println!("\nDone.");
+}
+
+// ── Helpers ──────────────────────────────────────────────────────
+
+fn wait_for_task(
+    store: &std::sync::Arc<xbible_engine::engines::freebible_engine::store_api::FreeBibleStore>,
+    task_id: &str,
+) {
+    let mut last_pct = -1.0f64;
+    loop {
+        thread::sleep(Duration::from_millis(300));
+        let Some(status) = store.poll_task(task_id.to_string()) else {
+            println!("  task disappeared");
+            break;
+        };
+        let pct = status.progress.fraction * 100.0;
+        if pct - last_pct >= 10.0 || pct >= 100.0 {
+            last_pct = pct;
+            println!("  [{:>5.1}%] {}", pct, status.progress.message);
+        }
+        match status.state {
+            FreeBibleTaskState::Running | FreeBibleTaskState::Queued => continue,
+            FreeBibleTaskState::Completed => break,
+            FreeBibleTaskState::Failed { error } => {
+                panic!("install failed: {error}");
+            }
+            FreeBibleTaskState::Cancelled => panic!("install cancelled"),
+        }
+    }
+}
+
+fn cleanup(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(format!("{}-wal", path.to_string_lossy()));
+    let _ = std::fs::remove_file(format!("{}-shm", path.to_string_lossy()));
 }

@@ -4,8 +4,7 @@ use std::collections::HashMap;
 
 use log::error;
 
-use crate::db::catalog::{self, DomainCommentary, DomainDataset, DomainTranslation};
-
+use super::catalog::{self, DomainCommentary, DomainDataset, DomainTranslation};
 use super::client::{BibleClient, FreeBibleCommentary, FreeBibleDataset, FreeBibleTranslation};
 use super::values::{
     BookCount, ChapterCount, Flag, LanguageCode, ShelfId, StoreItemId, StoreItemKind, VerseCount,
@@ -177,7 +176,7 @@ impl Store {
 
     /// Convert freshly-fetched client records into the domain model.
     /// Relies on `From<&FreeBibleTranslation>` etc. defined in
-    /// `db::catalog` so the conversion lives in exactly one place.
+    /// `freebible_engine::catalog` so the conversion lives in exactly one place.
     fn from_client_parts(
         translations: Vec<FreeBibleTranslation>,
         commentaries: Vec<FreeBibleCommentary>,

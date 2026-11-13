@@ -1,8 +1,0 @@
-# Configure the Sword library checkout and build settings.
-
-git_url = "https://github.com/Edcorp844/sword.git"
-git_rev = "HEAD"
-header = "include/sword/flatapi.h"
-lib_name = "sword"
-use_cmake = true
-link_kind = "static"
