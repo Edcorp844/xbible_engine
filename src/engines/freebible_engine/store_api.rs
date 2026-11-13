@@ -1,12 +1,12 @@
 // freebible_engine/store_api.rs
 
 use std::collections::HashMap;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
-use log::{error, info};
+use log::{error, info, warn};
 use rusqlite::Connection;
 
 use crate::db::writer::DbWriter;
@@ -137,7 +137,7 @@ fn empty_progress(message: String) -> InstallProgress {
 
 /// Run `body` on a freshly spawned thread, mapping every outcome
 /// (success, error, cancellation, panic, spawn failure) to a
-/// terminal task state. All three install paths share this so the
+/// terminal task state. Every install path shares this so the
 /// failure handling exists exactly once.
 fn run_task<F>(
     tasks: &Arc<Mutex<HashMap<String, TaskEntry>>>,
@@ -276,7 +276,17 @@ fn overlay_installed_flags(
                     .unwrap_or(0);
                 item.installed = Flag::from_sql_int(installed).as_bool();
             }
-            StoreItemKind::Commentary | StoreItemKind::Dataset => {}
+            StoreItemKind::Commentary => {
+                let installed: i32 = conn
+                    .query_row(
+                        "SELECT installed FROM commentaries WHERE id = ?1",
+                        rusqlite::params![item.id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                item.installed = Flag::from_sql_int(installed).as_bool();
+            }
+            StoreItemKind::Dataset => {}
         }
     }
 }
@@ -385,10 +395,21 @@ impl FreeBibleStore {
             .unwrap_or(0)
     }
 
-    // ── Install ────────────────────────────────────────────────
+    // ── Install: translation ───────────────────────────────────
 
     pub fn install_translation(&self, translation_id: String) -> Result<String, FreeBibleError> {
-        let writer = read_or_recover(&self.writer).clone().ok_or_else(not_open_err)?;
+        if translation_id.contains(':') {
+            return Err(FreeBibleError::Generic {
+                error_message: format!(
+                    "{translation_id} looks like a store item id, not a translation id — \
+                     call installEntitySet instead"
+                ),
+            });
+        }
+
+        let writer = read_or_recover(&self.writer)
+            .clone()
+            .ok_or_else(not_open_err)?;
 
         let task_id = alloc_task_id(&self.next_id, TaskKind::Install, &translation_id);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -413,60 +434,24 @@ impl FreeBibleStore {
             "xbible-inst",
             success_message,
             "Install failed",
-            move || {
-                let outcome = run_install_translation(&writer, &id, &tasks, &tid, &cancel);
-                outcome
-            },
-        );
-
-        Ok(task_id.0)
-    }
-
-    pub fn install_entity_set(
-        &self,
-        dataset_id: String,
-        kind_str: String,
-    ) -> Result<String, FreeBibleError> {
-        let Some(kind) = EntityKind::from_wire(&kind_str) else {
-            return Err(FreeBibleError::Generic {
-                error_message: format!("unknown entity kind: {kind_str}"),
-            });
-        };
-
-        let writer = read_or_recover(&self.writer).clone().ok_or_else(not_open_err)?;
-
-        let task_id = alloc_task_id(&self.next_id, TaskKind::Entity, &kind_str);
-        let cancel = Arc::new(AtomicBool::new(false));
-
-        register_task(
-            &self.tasks,
-            &task_id,
-            TaskKind::Entity,
-            &kind_str,
-            "Queued",
-            &cancel,
-        );
-
-        let tid = task_id.clone();
-        let tasks = self.tasks.clone();
-        let dataset = dataset_id.clone();
-        let kind_label = kind_str.clone();
-
-        let success_message = format!("{} installed", kind_label);
-        run_task(
-            &self.tasks,
-            &task_id,
-            "xbible-entity",
-            success_message,
-            "Entity install failed",
-            move || run_install_entity_set(&writer, &dataset, kind, &tasks, &tid, &cancel),
+            move || run_install_translation(&writer, &id, &tasks, &tid, &cancel),
         );
 
         Ok(task_id.0)
     }
 
     pub fn uninstall_translation(&self, translation_id: String) -> Result<String, FreeBibleError> {
-        let writer = read_or_recover(&self.writer).clone().ok_or_else(not_open_err)?;
+        if translation_id.contains(':') {
+            return Err(FreeBibleError::Generic {
+                error_message: format!(
+                    "{translation_id} looks like a store item id, not a translation id"
+                ),
+            });
+        }
+
+        let writer = read_or_recover(&self.writer)
+            .clone()
+            .ok_or_else(not_open_err)?;
 
         let task_id = alloc_task_id(&self.next_id, TaskKind::Uninstall, &translation_id);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -504,6 +489,146 @@ impl FreeBibleStore {
                 info!("uninstall {} complete", id);
                 Ok(())
             },
+        );
+
+        Ok(task_id.0)
+    }
+
+    // ── Install: commentary ────────────────────────────────────
+
+    /// Install a commentary. Commentaries have no `complete.json`,
+    /// so this fetches the book list once and then per-chapter.
+    /// One writer job per book.
+    pub fn install_commentary(&self, commentary_id: String) -> Result<String, FreeBibleError> {
+        if commentary_id.contains(':') {
+            return Err(FreeBibleError::Generic {
+                error_message: format!(
+                    "{commentary_id} looks like a store item id, not a commentary id"
+                ),
+            });
+        }
+
+        let writer = read_or_recover(&self.writer)
+            .clone()
+            .ok_or_else(not_open_err)?;
+
+        let task_id = alloc_task_id(&self.next_id, TaskKind::Install, &commentary_id);
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        register_task(
+            &self.tasks,
+            &task_id,
+            TaskKind::Install,
+            &commentary_id,
+            "Queued",
+            &cancel,
+        );
+
+        let tid = task_id.clone();
+        let tasks = self.tasks.clone();
+        let id = commentary_id.clone();
+
+        let success_message = format!("{} installed", id);
+        run_task(
+            &self.tasks,
+            &task_id,
+            "xbible-commentary",
+            success_message,
+            "Commentary install failed",
+            move || run_install_commentary(&writer, &id, &tasks, &tid, &cancel),
+        );
+
+        Ok(task_id.0)
+    }
+
+    pub fn uninstall_commentary(&self, commentary_id: String) -> Result<String, FreeBibleError> {
+        let writer = read_or_recover(&self.writer)
+            .clone()
+            .ok_or_else(not_open_err)?;
+
+        let task_id = alloc_task_id(&self.next_id, TaskKind::Uninstall, &commentary_id);
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        register_task(
+            &self.tasks,
+            &task_id,
+            TaskKind::Uninstall,
+            &commentary_id,
+            "Queued",
+            &cancel,
+        );
+
+        let tid = task_id.clone();
+        let tasks = self.tasks.clone();
+        let id = commentary_id.clone();
+
+        let success_message = format!("{} uninstalled", id);
+        run_task(
+            &self.tasks,
+            &task_id,
+            "xbible-uninst-commentary",
+            success_message,
+            "Commentary uninstall failed",
+            move || {
+                set_state(&tasks, &tid, FreeBibleTaskState::Running, |p| {
+                    p.message = format!("Uninstalling {}…", id);
+                });
+
+                let id_for_job = id.clone();
+                writer.submit("uninstall_commentary", cancel.clone(), move |conn| {
+                    install::uninstall_commentary(conn, &id_for_job)
+                })?;
+
+                info!("commentary {} uninstalled", id);
+                Ok(())
+            },
+        );
+
+        Ok(task_id.0)
+    }
+
+    // ── Install: entity set ────────────────────────────────────
+
+    pub fn install_entity_set(
+        &self,
+        dataset_id: String,
+        kind_str: String,
+    ) -> Result<String, FreeBibleError> {
+        let Some(kind) = EntityKind::from_wire(&kind_str) else {
+            return Err(FreeBibleError::Generic {
+                error_message: format!("unknown entity kind: {kind_str}"),
+            });
+        };
+
+        let writer = read_or_recover(&self.writer)
+            .clone()
+            .ok_or_else(not_open_err)?;
+
+        let task_id = alloc_task_id(&self.next_id, TaskKind::Entity, &kind_str);
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        register_task(
+            &self.tasks,
+            &task_id,
+            TaskKind::Entity,
+            &kind_str,
+            "Queued",
+            &cancel,
+        );
+
+        let tid = task_id.clone();
+        let tasks = self.tasks.clone();
+        let dataset = dataset_id.clone();
+        let kind_label = kind_str.clone();
+
+        let success_message = format!("{} installed", kind_label);
+        run_task(
+            &self.tasks,
+            &task_id,
+            "xbible-entity",
+            success_message,
+            "Entity install failed",
+            move || run_install_entity_set(&writer, &dataset, kind, &tasks, &tid, &cancel),
         );
 
         Ok(task_id.0)
@@ -640,6 +765,86 @@ fn run_install_translation(
         "installed {} ({} chapters, {} verses)",
         id, chapters_done, verses_done
     );
+    Ok(())
+}
+fn run_install_commentary(
+    writer: &DbWriter,
+    id: &str,
+    tasks: &Arc<Mutex<HashMap<String, TaskEntry>>>,
+    tid: &TaskId,
+    cancel: &Arc<AtomicBool>,
+) -> Result<(), FreeBibleError> {
+    set_state(tasks, tid, FreeBibleTaskState::Running, |p| {
+        p.message = format!("Fetching {} book list…", id);
+    });
+
+    let client = BibleClient::new();
+    let books = client.commentary_books(id)?;
+    let total_chapters: i32 = books.iter().map(|b| b.number_of_chapters).sum();
+
+    writer.submit("begin_commentary_install", cancel.clone(), {
+        let id = id.to_string();
+        move |conn| install::begin_commentary_install(conn, &id)
+    })?;
+
+    let mut chapters_done = 0i32;
+    for book in &books {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(FreeBibleError::Generic {
+                error_message: "cancelled".into(),
+            });
+        }
+
+        // Book row first — one tiny job.
+        let book_for_job = book.clone();
+        let id_for_job = id.to_string();
+        writer.submit("begin_commentary_book", cancel.clone(), move |conn| {
+            install::begin_commentary_book(conn, &id_for_job, &book_for_job)
+        })?;
+
+        // Parallel-fetch this book's chapters. `WORKERS` in flight,
+        // skipped chapters logged and dropped inside the helper.
+        let chapters = install::fetch_commentary_book_chapters(&client, id, book, cancel);
+
+        // Persist each chapter in its own writer job, advancing
+        // progress after each commit.
+        for chapter in chapters {
+            let book_id = book.id.clone();
+            let id_for_job = id.to_string();
+            let chapter_for_job = chapter.clone();
+            writer.submit("persist_commentary_chapter", cancel.clone(), move |conn| {
+                install::persist_commentary_chapter(conn, &id_for_job, &book_id, &chapter_for_job)
+            })?;
+
+            chapters_done += 1;
+            let fraction = 0.05 + (chapters_done as f64 / total_chapters.max(1) as f64) * 0.95;
+            update_progress(
+                tasks,
+                tid,
+                InstallProgress {
+                    fraction,
+                    chapters_done,
+                    chapters_total: total_chapters,
+                    current_book_name: book.name.clone(),
+                    current_book_id: book.id.clone(),
+                    current_chapter: chapter.chapter_number,
+                    current_chapter_verses: chapter.content.len() as i32,
+                    verses_done: chapters_done,
+                    message: format!(
+                        "{} {} — {}/{} chapters",
+                        book.name, chapter.chapter_number, chapters_done, total_chapters
+                    ),
+                },
+            );
+        }
+    }
+
+    writer.submit("mark_commentary_installed", cancel.clone(), {
+        let id = id.to_string();
+        move |conn| install::mark_commentary_installed(conn, &id)
+    })?;
+
+    info!("commentary {} installed ({} chapters)", id, chapters_done);
     Ok(())
 }
 

@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -8,7 +8,7 @@ use std::thread;
 use log::{error, info, warn};
 
 use crate::engines::freebible_engine::client::{
-    BibleClient, FreeBibleBook, FreeBibleCompleteBook, FreeBibleVerse,
+    BibleClient, FreeBibleBook, FreeBibleCommentaryChapter, FreeBibleCompleteBook, FreeBibleVerse,
 };
 use crate::engines::freebible_engine::error::FreeBibleError;
 
@@ -110,13 +110,7 @@ pub(crate) fn wipe_translation(
 
 // ── Translation install helpers (called from store_api via writer) ──
 
-/// Wipe any previous install and clear the installed flag.
-/// Runs as the first writer job of an install so a failed install
-/// leaves the translation marked as not-installed.
-pub(crate) fn begin_install(
-    conn: &Connection,
-    translation_id: &str,
-) -> Result<(), FreeBibleError> {
+pub(crate) fn begin_install(conn: &Connection, translation_id: &str) -> Result<(), FreeBibleError> {
     wipe_translation(conn, translation_id)?;
     conn.execute(
         "UPDATE translations SET installed = 0 WHERE id = ?1",
@@ -128,9 +122,6 @@ pub(crate) fn begin_install(
     Ok(())
 }
 
-/// Persist one book's books/metadata row plus every chapter's verses,
-/// items, footnotes, audio timings, and raw JSON. Each call is one
-/// writer job (one transaction).
 pub(crate) fn persist_book(
     conn: &Connection,
     translation_id: &str,
@@ -303,18 +294,13 @@ pub(crate) fn persist_book(
                 chapter.raw_json
             ])
             .map_err(|e| FreeBibleError::Generic {
-                error_message: format!(
-                    "chapter_raw insert {} {}: {e}",
-                    book.id, chapter.number
-                ),
+                error_message: format!("chapter_raw insert {} {}: {e}", book.id, chapter.number),
             })?;
     }
 
     Ok(())
 }
 
-/// Mark the translation installed. Runs as the last writer job so the
-/// flag is only set after every book's transaction committed.
 pub(crate) fn mark_installed(
     conn: &Connection,
     translation_id: &str,
@@ -337,7 +323,6 @@ pub(crate) fn mark_installed(
     Ok(())
 }
 
-/// Uninstall: wipe content and clear the flag. Runs as one writer job.
 pub(crate) fn uninstall_translation(
     conn: &Connection,
     translation_id: &str,
@@ -360,6 +345,217 @@ pub(crate) fn uninstall_translation(
     Ok(())
 }
 
+// ── Commentary install helpers ────────────────────────────────
+//
+// A commentary chapter is much heavier than a translation chapter:
+// Adam Clarke writes hundreds to thousands of words per verse, so
+// a single chapter can be tens of KB. `persist_commentary_book`
+// (whole-book transaction) took minutes on Genesis and froze the
+// UI; `persist_commentary_chapter` is the per-chapter replacement.
+// Network fetches are parallelized in `fetch_commentary_book_chapters`
+// so the wall-clock cost is (chapters / WORKERS) × latency, not
+// chapters × latency.
+
+pub(crate) fn begin_commentary_install(
+    conn: &Connection,
+    commentary_id: &str,
+) -> Result<(), FreeBibleError> {
+    conn.execute(
+        "DELETE FROM commentary_chapters WHERE commentary_id = ?1",
+        params![commentary_id],
+    )
+    .map_err(|e| FreeBibleError::Generic {
+        error_message: format!("wipe commentary_chapters: {e}"),
+    })?;
+    conn.execute(
+        "DELETE FROM commentary_books WHERE commentary_id = ?1",
+        params![commentary_id],
+    )
+    .map_err(|e| FreeBibleError::Generic {
+        error_message: format!("wipe commentary_books: {e}"),
+    })?;
+    conn.execute(
+        "UPDATE commentaries SET installed = 0 WHERE id = ?1",
+        params![commentary_id],
+    )
+    .map_err(|e| FreeBibleError::Generic {
+        error_message: format!("clear commentary installed flag: {e}"),
+    })?;
+    Ok(())
+}
+
+/// Persist the `commentary_books` row for one book, empty of chapters.
+/// Called once per book, before the per-chapter loop. One writer job.
+pub(crate) fn begin_commentary_book(
+    conn: &Connection,
+    commentary_id: &str,
+    book: &FreeBibleBook,
+) -> Result<(), FreeBibleError> {
+    conn.execute(
+        "INSERT OR REPLACE INTO commentary_books
+            (commentary_id, id, name, number_of_chapters, book_order)
+         VALUES (?1,?2,?3,?4,?5)",
+        params![
+            commentary_id,
+            book.id,
+            book.name,
+            book.number_of_chapters,
+            book.book_order,
+        ],
+    )
+    .map_err(|e| FreeBibleError::Generic {
+        error_message: format!("commentary_books insert ({}): {e}", book.id),
+    })?;
+    Ok(())
+}
+
+/// Persist one commentary chapter. One writer job per chapter so the
+/// transaction stays small (tens of KB, not hundreds of MB) and the
+/// caller can report progress between commits.
+pub(crate) fn persist_commentary_chapter(
+    conn: &Connection,
+    commentary_id: &str,
+    book_id: &str,
+    chapter: &FreeBibleCommentaryChapter,
+) -> Result<(), FreeBibleError> {
+    let mut stmt = conn
+        .prepare(
+            "INSERT OR REPLACE INTO commentary_chapters
+                (commentary_id, book_id, chapter, verse_number, position, text, raw_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        )
+        .map_err(|e| FreeBibleError::Generic {
+            error_message: format!("prepare commentary_chapters: {e}"),
+        })?;
+
+    for (pos, v) in chapter.content.iter().enumerate() {
+        stmt.execute(params![
+            commentary_id,
+            book_id,
+            chapter.chapter_number,
+            v.number,
+            pos as i32,
+            v.text,
+            "{}",
+        ])
+        .map_err(|e| FreeBibleError::Generic {
+            error_message: format!(
+                "commentary_chapters insert {} {}:{}: {e}",
+                book_id, chapter.chapter_number, v.number
+            ),
+        })?;
+    }
+    Ok(())
+}
+
+pub(crate) fn mark_commentary_installed(
+    conn: &Connection,
+    commentary_id: &str,
+) -> Result<(), FreeBibleError> {
+    let n = conn
+        .execute(
+            "UPDATE commentaries SET installed = 1 WHERE id = ?1",
+            params![commentary_id],
+        )
+        .map_err(|e| FreeBibleError::Generic {
+            error_message: format!("mark commentary installed: {e}"),
+        })?;
+    if n == 0 {
+        return Err(FreeBibleError::Generic {
+            error_message: format!(
+                "commentary {commentary_id} not in catalog — call refresh() first"
+            ),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn uninstall_commentary(
+    conn: &Connection,
+    commentary_id: &str,
+) -> Result<(), FreeBibleError> {
+    begin_commentary_install(conn, commentary_id)?;
+    info!("uninstalled commentary {}", commentary_id);
+    Ok(())
+}
+
+// ── Commentary install: parallel network side ─────────────────
+
+/// Fetch every chapter of one book in parallel, `WORKERS` at a time.
+///
+/// Some commentaries skip chapters (or whole books); a 404 for one
+/// chapter is logged and dropped, not fatal. Returns the fetched
+/// chapters in arrival order — the writer persists each one in its
+/// own job, so order does not matter for correctness, only for
+/// progress reporting, and the caller counts what it gets back.
+pub(crate) fn fetch_commentary_book_chapters(
+    client: &BibleClient,
+    commentary_id: &str,
+    book: &FreeBibleBook,
+    cancel: &Arc<AtomicBool>,
+) -> Vec<FreeBibleCommentaryChapter> {
+    let chapter_numbers: Vec<u32> = (1..=book.number_of_chapters)
+        .map(|n| n as u32)
+        .collect();
+
+    let queue = Arc::new(Mutex::new(chapter_numbers));
+    let (tx, rx) =
+        mpsc::sync_channel::<FreeBibleCommentaryChapter>(CHANNEL_CAPACITY);
+
+    let commentary_owned = commentary_id.to_string();
+    let book_id = book.id.clone();
+    let book_number_of_chapters = book.number_of_chapters;
+
+    let mut handles = Vec::with_capacity(WORKERS);
+    for _ in 0..WORKERS {
+        let queue = queue.clone();
+        let tx = tx.clone();
+        // Cheap: shares the connection pool. Every book of the
+        // install reuses the same 8 TCP/TLS connections.
+        let client = client.clone();
+        let cancel = cancel.clone();
+        let commentary_id = commentary_owned.clone();
+        let book_id = book_id.clone();
+
+        handles.push(thread::spawn(move || loop {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let next = {
+                let mut q = queue.lock().unwrap_or_else(|p| p.into_inner());
+                q.pop()
+            };
+            let Some(ch_num) = next else { return };
+
+            match client.commentary_chapter(&commentary_id, &book_id, ch_num) {
+                Ok(ch) => {
+                    if tx.send(ch).is_err() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "commentary {} {}:{} skipped: {}",
+                        commentary_id, book_id, ch_num, e
+                    );
+                }
+            }
+        }));
+    }
+    drop(tx);
+
+    let mut out = Vec::with_capacity(book_number_of_chapters as usize);
+    while let Ok(ch) = rx.recv() {
+        out.push(ch);
+    }
+
+    for h in handles {
+        let _ = h.join();
+    }
+
+    out
+}
+
 // ── Entity install: network side ─────────────────────────────
 
 /// Number of entities in the dataset for this kind. One network call.
@@ -377,19 +573,12 @@ pub(crate) fn count_entity_set(
     Ok(summaries.len() as i32)
 }
 
-/// Parallel-fetch every entity detail. Returns the raw JSON responses
-/// (one per entity, in arrival order). Writes nothing — the caller
-/// passes the result to `persist_entity_batch` on the writer.
 pub(crate) fn fetch_entity_set(
     client: &BibleClient,
     dataset_id: &str,
     kind: EntityKind,
     mut on_progress: impl FnMut(i32),
 ) -> Result<Vec<serde_json::Value>, FreeBibleError> {
-    // Re-fetch the summary list to get the ids we need. This is a
-    // second call to the same endpoint `count_entity_set` used; the
-    // data is small (a few hundred KB) and caching it across the two
-    // calls would complicate the interface for no real benefit.
     let summaries = match kind {
         EntityKind::Person => client.dataset_people_list(dataset_id)?,
         EntityKind::Event => client.dataset_events_list(dataset_id)?,
@@ -415,27 +604,29 @@ pub(crate) fn fetch_entity_set(
         let client = shared_client.clone();
         let dataset = dataset_id.to_string();
 
-        handles.push(thread::spawn(move || loop {
-            let next = {
-                let mut q = queue.lock().unwrap_or_else(|p| p.into_inner());
-                q.pop()
-            };
-            let Some(id) = next else { return };
+        handles.push(thread::spawn(move || {
+            loop {
+                let next = {
+                    let mut q = queue.lock().unwrap_or_else(|p| p.into_inner());
+                    q.pop()
+                };
+                let Some(id) = next else { return };
 
-            let result = match kind {
-                EntityKind::Person => client.dataset_person(&dataset, &id),
-                EntityKind::Event => client.dataset_event(&dataset, &id),
-                EntityKind::Place => client.dataset_place(&dataset, &id),
-                EntityKind::Group => client.dataset_group(&dataset, &id),
-            };
+                let result = match kind {
+                    EntityKind::Person => client.dataset_person(&dataset, &id),
+                    EntityKind::Event => client.dataset_event(&dataset, &id),
+                    EntityKind::Place => client.dataset_place(&dataset, &id),
+                    EntityKind::Group => client.dataset_group(&dataset, &id),
+                };
 
-            match result {
-                Ok(v) => {
-                    if tx.send(v).is_err() {
-                        return;
+                match result {
+                    Ok(v) => {
+                        if tx.send(v).is_err() {
+                            return;
+                        }
                     }
+                    Err(e) => error!("fetch {} {} failed: {}", kind.as_str(), id, e),
                 }
-                Err(e) => error!("fetch {} {} failed: {}", kind.as_str(), id, e),
             }
         }));
     }
@@ -458,7 +649,6 @@ pub(crate) fn fetch_entity_set(
 
 // ── Entity install: write side ────────────────────────────────
 
-/// Wipe existing rows of this kind for this dataset. One writer job.
 pub(crate) fn begin_entity_install(
     conn: &Connection,
     dataset_id: &str,
@@ -494,8 +684,6 @@ pub(crate) fn begin_entity_install(
     Ok(())
 }
 
-/// Persist one batch of entity detail responses. One writer job
-/// (one transaction) per batch so the queue stays responsive.
 pub(crate) fn persist_entity_batch(
     conn: &Connection,
     dataset_id: &str,
@@ -540,7 +728,6 @@ pub(crate) fn persist_entity_batch(
     Ok(())
 }
 
-/// Record the install state. One writer job, runs last.
 pub(crate) fn mark_entity_installed(
     conn: &Connection,
     dataset_id: &str,
@@ -593,8 +780,11 @@ fn write_person(
     let death_year = person.get("deathYear").and_then(|v| v.as_i64());
     let min_year = person.get("minYear").and_then(|v| v.as_i64());
     let max_year = person.get("maxYear").and_then(|v| v.as_i64());
-    let description =
-        join_description(person.get("description").unwrap_or(&serde_json::Value::Null));
+    let description = join_description(
+        person
+            .get("description")
+            .unwrap_or(&serde_json::Value::Null),
+    );
 
     conn.execute(
         "INSERT OR REPLACE INTO people (
@@ -747,7 +937,6 @@ fn write_group(
 
 // ── Graph writers ────────────────────────────────────────────
 
-/// (json_field, relation_name, default_target_kind_if_type_missing)
 const PERSON_REFS: &[(&str, &str, &str)] = &[
     ("birthPlace", "birth_place", "place"),
     ("deathPlace", "death_place", "place"),

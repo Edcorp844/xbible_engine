@@ -74,7 +74,12 @@ impl FreeBibleEngine {
         // 2. Shut the old writer down and drop our handle to it. Any
         //    task still holding a clone will get "writer gone" on its
         //    next submit and fail cleanly.
-        if let Some(writer) = self.writer.write().unwrap_or_else(|p| p.into_inner()).take() {
+        if let Some(writer) = self
+            .writer
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
             writer.shutdown();
         }
 
@@ -114,9 +119,11 @@ pub use client::{
     FreeBibleCompleteBook, FreeBibleCompleteChapter, FreeBibleDataset, FreeBibleFootnote,
     FreeBibleLexiconEntry, FreeBibleTranslation, FreeBibleVerse,
 };
+
 pub use reader::{
-    EntityRef, EventDetail, GroupDetail, InstalledTranslation, PersonDetail, PlaceDetail,
-    ReaderBlock, ReaderChapter, ReaderVerse, ReaderWord, VerseRange,
+    CommentaryBlock, CommentaryChapter, EntityRef, EventDetail, GroupDetail, InstalledTranslation,
+    PersonDetail, PlaceDetail, ReaderBlock, ReaderChapter, ReaderVerse, ReaderWord, VerseRange,
 };
+
 pub use store::{LanguageFacet, Store, StoreItem, StoreShelf};
 pub use utils::{FreeBibleTaskState, FreeBibleTaskStatus, InstallProgress};

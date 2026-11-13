@@ -220,7 +220,7 @@ struct GroupsListResponse {
 
 // ── Client ────────────────────────────────────────────────────────
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BibleClient {
     http: Client,
     base_url: String,

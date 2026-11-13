@@ -189,7 +189,6 @@ const MIGRATIONS: &[M<'_>] = &[
         );
         "#,
     ),
-
     // ── v5: Theographic entity graph ──────────────────────────────
     M::up(
         r#"
@@ -292,6 +291,33 @@ const MIGRATIONS: &[M<'_>] = &[
         );
         "#,
     ),
+    // ── v6: commentary content ────────────────────────────────────
+    M::up(
+        r#"
+        CREATE TABLE IF NOT EXISTS commentary_books (
+            commentary_id TEXT NOT NULL,
+            id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            number_of_chapters INTEGER NOT NULL,
+            book_order INTEGER,
+            PRIMARY KEY (commentary_id, id)
+        );
+
+        CREATE TABLE IF NOT EXISTS commentary_chapters (
+            commentary_id TEXT NOT NULL,
+            book_id TEXT NOT NULL,
+            chapter INTEGER NOT NULL,
+            verse_number INTEGER NOT NULL,
+            position INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            raw_json TEXT,
+            PRIMARY KEY (commentary_id, book_id, chapter, verse_number, position)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_commentary_chapters_lookup
+            ON commentary_chapters (commentary_id, book_id, chapter);
+        "#,
+    ),
 ];
 
 /// Apply every pending migration to `conn`, bringing it to
@@ -317,7 +343,9 @@ mod tests {
     #[test]
     fn migrations_apply_to_temp_db() {
         let mut conn = Connection::open_in_memory().unwrap();
-        Migrations::from_slice(MIGRATIONS).to_latest(&mut conn).unwrap();
+        Migrations::from_slice(MIGRATIONS)
+            .to_latest(&mut conn)
+            .unwrap();
 
         let version: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
@@ -325,12 +353,27 @@ mod tests {
         assert_eq!(version, MIGRATIONS.len() as i32);
 
         for table in [
-            "translations", "commentaries", "datasets",
-            "books", "verses",
-            "lexicon", "interlinear_words",
-            "book_metadata", "chapter_items", "footnotes", "audio_timings", "chapter_raw",
-            "people", "events", "places", "people_groups",
-            "entity_refs", "entity_verse_refs", "entity_install_state",
+            "translations",
+            "commentaries",
+            "datasets",
+            "books",
+            "verses",
+            "lexicon",
+            "interlinear_words",
+            "book_metadata",
+            "chapter_items",
+            "footnotes",
+            "audio_timings",
+            "chapter_raw",
+            "people",
+            "events",
+            "places",
+            "people_groups",
+            "entity_refs",
+            "entity_verse_refs",
+            "entity_install_state",
+            "commentary_books",
+            "commentary_chapters",
         ] {
             let exists: i32 = conn
                 .query_row(

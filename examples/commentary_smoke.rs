@@ -4,9 +4,8 @@
 //!   /api/c/{commentary}/books.json
 //!   /api/c/{commentary}/{book}/{chapter}.json
 //!
-//! Commentaries have no `complete.json`, so the install is per-chapter
-//! (parallel), the same fallback path translations use when
-//! `complete.json` is unavailable.
+//! Commentaries have no `complete.json`, so the install fetches the
+//! book list once and then per-chapter.
 
 use std::thread;
 use std::time::Duration;
@@ -36,60 +35,33 @@ fn main() {
     println!("Refreshing catalog…");
     store.refresh().expect("refresh failed");
 
-    // The catalog row for a commentary is what `install_commentary`
-    // will later flip to `installed = 1`. If it's missing, the
-    // install succeeds and `mark_installed` fails with "not in
-    // catalog" — the same trap the translation install had.
     println!("Catalog refreshed. Looking for {COMMENTARY}…");
 
     // ── 2. Install the commentary ───────────────────────────────
-    //
-    // REQUIRES: `FreeBibleStore::install_commentary(&self, commentary_id: String) -> Result<String, FreeBibleError>`
-    //
-    // That method does not exist yet. It should:
-    //   - look up the commentary in `commentaries` (error if absent)
-    //   - spawn a task thread (like `install_translation`)
-    //   - in the task: `client.commentary_books(id)?` → Vec<FreeBibleBook>
-    //   - submit `begin_commentary_install(conn, id)` to the writer
-    //   - for each book, for each chapter: fetch and persist
-    //     (commentaries have no complete.json; this is the parallel path)
-    //   - submit `mark_commentary_installed(conn, id)` last
-    //
-    // The SQL is identical to the translation install, but the
-    // content lands under the commentary_id in the same
-    // `chapter_items` / `chapter_raw` tables, with a NULL
-    // `translation_id` and a separate `commentary_id` — or, simpler,
-    // reuse `translation_id` for the commentary id and add a
-    // `kind` column in a future migration. See the note at the end.
     println!("\nInstalling commentary {COMMENTARY}…");
     let task_id = store
-        .install_translation(COMMENTARY.into())
+        .install_commentary(COMMENTARY.into())
         .expect("commentary install start failed");
     wait_for_task(&store, &task_id);
 
     // ── 3. Verify the install landed ────────────────────────────
     let installed = reader
-        .is_installed(COMMENTARY.into())
+        .is_commentary_installed(COMMENTARY.into())
         .expect("is_commentary_installed failed");
     println!("\nAfter install:");
     println!("  installed: {}", installed);
     assert!(installed, "{COMMENTARY} should be installed");
 
     // ── 4. Read a commentary chapter ────────────────────────────
-    //
-    // REQUIRES: `FreeBibleReader::read_commentary_chapter(&self, commentary_id: String, book_id: String, chapter: i32) -> Result<Option<CommentaryChapter>, FreeBibleError>`
-    //
-    // That method does not exist yet. It should query the same
-    // `chapter_items` / `footnotes` tables the translation reader
-    // uses, filtered by the commentary id, and return a shape
-    // similar to `ReaderChapter` but with `commentary_id` instead
-    // of `translation_id`. For Adam Clarke, the "verses" are
-    // commentary paragraphs keyed to a verse number, so the natural
-    // shape is `Vec<CommentaryBlock { verse_number: i32, text: String }>`.
     println!("\nReading {COMMENTARY} on Genesis 1…");
     let chapter = reader
-        .read_chapter(COMMENTARY.into(), "GEN".into(), 1)
+        .read_commentary_chapter(COMMENTARY.into(), "GEN".into(), 1)
         .expect("read_commentary_chapter failed");
+
+    let Some(chapter) = chapter else {
+        println!("  no commentary for GEN 1");
+        return;
+    };
 
     println!("  book:    {}", chapter.book_name);
     println!("  chapter: {}", chapter.chapter_number);
@@ -97,15 +69,7 @@ fn main() {
 
     for block in chapter.blocks.iter().take(5) {
         let preview: String = block.text.chars().take(120).collect();
-        if let Some(verse_number) = block.verse_number {
-            println!(
-                "  [verse {:>3}] {}",
-                verse_number,
-                preview
-            );
-        } else {
-            println!("  [no verse] {}", preview);
-        }
+        println!("  [verse {:>3}] {}", block.verse_number, preview);
     }
     if chapter.blocks.len() > 5 {
         println!("  … {} more", chapter.blocks.len() - 5);
@@ -117,16 +81,14 @@ fn main() {
     );
 
     // ── 5. Uninstall ────────────────────────────────────────────
-    //
-    // REQUIRES: `FreeBibleStore::uninstall_commentary(&self, commentary_id: String) -> Result<String, FreeBibleError>`
     println!("\nUninstalling {COMMENTARY}…");
     let task_id = store
-        .uninstall_translation(COMMENTARY.into())
+        .uninstall_commentary(COMMENTARY.into())
         .expect("commentary uninstall start failed");
     wait_for_task(&store, &task_id);
 
     let installed_after = reader
-        .is_installed(COMMENTARY.into())
+        .is_commentary_installed(COMMENTARY.into())
         .expect("is_commentary_installed failed");
     println!("\nAfter uninstall:");
     println!("  installed: {}", installed_after);

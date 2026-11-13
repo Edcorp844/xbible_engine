@@ -44,6 +44,23 @@ pub struct ReaderChapter {
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
+pub struct CommentaryBlock {
+    pub verse_number: i32,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct CommentaryChapter {
+    pub commentary_id: String,
+    pub book_id: String,
+    pub book_name: String,
+    pub chapter_number: i32,
+    pub blocks: Vec<CommentaryBlock>,
+    pub next_chapter: Option<i32>,
+    pub prev_chapter: Option<i32>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct InstalledTranslation {
     pub id: String,
     pub name: String,
@@ -1025,6 +1042,154 @@ impl FreeBibleReader {
         )
         .map(|v| v == 1)
         .unwrap_or(false)
+    }
+
+    pub fn is_commentary_installed(&self, commentary_id: String) -> Result<bool, FreeBibleError> {
+        let conn_arc = match self.conn.read().unwrap_or_else(|p| p.into_inner()).clone() {
+            Some(c) => c,
+            None => {
+                return Err(FreeBibleError::Generic {
+                    error_message: "reader has no connection — call setDbPath first".into(),
+                });
+            }
+        };
+        let conn = conn_arc.lock().unwrap_or_else(|p| p.into_inner());
+
+        // Same catalog-check pattern as `is_installed`: a typo like
+        // "adam-clark" should fail loudly, not read as "not installed".
+        let in_catalog = conn
+            .query_row(
+                "SELECT 1 FROM commentaries WHERE id = ?1",
+                rusqlite::params![commentary_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|e| FreeBibleError::Generic {
+                error_message: format!(
+                    "is_commentary_installed({commentary_id}) catalog check failed: {e}"
+                ),
+            })?
+            .is_some();
+
+        if !in_catalog {
+            return Err(FreeBibleError::Generic {
+                error_message: format!(
+                    "commentary {commentary_id} not in catalog — call refresh() first"
+                ),
+            });
+        }
+
+        let installed: i32 = conn
+            .query_row(
+                "SELECT installed FROM commentaries WHERE id = ?1",
+                rusqlite::params![commentary_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| FreeBibleError::Generic {
+                error_message: format!(
+                    "is_commentary_installed({commentary_id}) query failed: {e}"
+                ),
+            })?;
+
+        Ok(installed == 1)
+    }
+
+    pub fn read_commentary_chapter(
+        &self,
+        commentary_id: String,
+        book_id: String,
+        chapter: i32,
+    ) -> Result<Option<CommentaryChapter>, FreeBibleError> {
+        let conn_arc = match self.conn.read().unwrap_or_else(|p| p.into_inner()).clone() {
+            Some(c) => c,
+            None => {
+                return Err(FreeBibleError::Generic {
+                    error_message: "reader has no connection — call setDbPath first".into(),
+                });
+            }
+        };
+        let conn = conn_arc.lock().unwrap_or_else(|p| p.into_inner());
+
+        // Book name + total-chapters lookup. If the book isn't in
+        // `commentary_books`, the commentary has nothing for it — return
+        // Ok(None), which the caller renders as "no commentary here".
+        let book_row = conn
+            .query_row(
+                "SELECT name, number_of_chapters FROM commentary_books
+             WHERE commentary_id = ?1 AND id = ?2",
+                rusqlite::params![commentary_id, book_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)?)),
+            )
+            .optional()
+            .map_err(|e| FreeBibleError::Generic {
+                error_message: format!(
+                    "read_commentary_chapter({commentary_id}, {book_id}) book lookup failed: {e}"
+                ),
+            })?;
+
+        let Some((book_name, total_chapters)) = book_row else {
+            return Ok(None);
+        };
+
+        let mut stmt = conn
+        .prepare(
+            "SELECT verse_number, text FROM commentary_chapters
+             WHERE commentary_id = ?1 AND book_id = ?2 AND chapter = ?3
+             ORDER BY position",
+        )
+        .map_err(|e| FreeBibleError::Generic {
+            error_message: format!(
+                "read_commentary_chapter({commentary_id}, {book_id} {chapter}) prepare failed: {e}"
+            ),
+        })?;
+
+        let rows = stmt
+        .query_map(
+            rusqlite::params![commentary_id, book_id, chapter],
+            |r| {
+                Ok(CommentaryBlock {
+                    verse_number: r.get(0)?,
+                    text: r.get(1)?,
+                })
+            },
+        )
+        .map_err(|e| FreeBibleError::Generic {
+            error_message: format!(
+                "read_commentary_chapter({commentary_id}, {book_id} {chapter}) query failed: {e}"
+            ),
+        })?;
+
+        let blocks: Vec<CommentaryBlock> = rows
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => {
+                log::error!(
+                    "read_commentary_chapter({commentary_id}, {book_id} {chapter}) row failed: {e}"
+                );
+                None
+            }
+        })
+        .collect();
+
+        // No rows for this chapter: the book exists but this chapter has
+        // no commentary. Same contract as a missing book — Ok(None).
+        if blocks.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(CommentaryChapter {
+            commentary_id,
+            book_id,
+            book_name,
+            chapter_number: chapter,
+            blocks,
+            next_chapter: if chapter < total_chapters {
+                Some(chapter + 1)
+            } else {
+                None
+            },
+            prev_chapter: if chapter > 1 { Some(chapter - 1) } else { None },
+        }))
     }
 
     pub fn is_installed(&self, translation_id: String) -> Result<bool, FreeBibleError> {
