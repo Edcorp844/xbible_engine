@@ -1,12 +1,14 @@
 //! Install a translation, then exercise the search API end to end.
 //!
-//! Six queries, one per code path:
+//! Eight queries, one per code path:
 //!   1. "shepherd"           → text search (FTS5), single token
-//!   2. "love God"           → multi-word text search (AND)
+//!   2. "love God"           → text search (FTS5), multi-word AND
 //!   3. "JHN 3:16"           → reference (single verse, id resolution)
 //!   4. "gen 1:1-5"          → reference (verse range, name resolution)
 //!   5. "H430"               → lexicon (0 hits until a lexicon is installed)
 //!   6. "God" filtered to Psalms → text search with book filter
+//!   7. "love God" phrase    → phrase mode (adjacent only)
+//!   8. "LORD" regex         → regex mode (bypasses FTS5)
 //!
 //! Progress events are printed as they arrive, so the phase
 //! transition Classifying → Resolving → Querying → Ranking → Done
@@ -22,7 +24,7 @@ use log::{error, info};
 use xbible_engine::XBibleEngine;
 use xbible_engine::engines::freebible_engine::reader::SearchProgressListener;
 use xbible_engine::engines::freebible_engine::search::{
-    SearchFilter, SearchPhase, SearchProgress, SearchResults,
+    SearchFilter, SearchMode, SearchPhase, SearchProgress, SearchResults,
 };
 use xbible_engine::engines::freebible_engine::utils::FreeBibleTaskState;
 
@@ -61,27 +63,79 @@ fn main() {
 
     // ── 2. Run the queries ──────────────────────────────────────
     //
-    // Each entry is (query, translation_id, filter).
-    let queries: &[(&str, Option<&str>, SearchFilter)] = &[
-        ("shepherd", Some(TRANSLATION), SearchFilter::default()),
-        ("love God", Some(TRANSLATION), SearchFilter::default()),
-        ("JHN 3:16", Some(TRANSLATION), SearchFilter::default()),
-        ("gen 1:1-5", Some(TRANSLATION), SearchFilter::default()),
-        ("H430", None, SearchFilter::default()),
-        // Sixth query: text search restricted to the Psalms.
+    // Each entry is (label, query, translation_id, filter).
+    // The label is only for the section header so it's clear which
+    // code path each query exercises.
+    let queries: &[(&str, &str, Option<&str>, SearchFilter)] = &[
+        // Text search (FTS5), single token.
         (
+            "text, single token",
+            "shepherd",
+            Some(TRANSLATION),
+            SearchFilter::default(),
+        ),
+        // Text search (FTS5), multi-word AND (the default mode).
+        (
+            "text, multi-word",
+            "love God",
+            Some(TRANSLATION),
+            SearchFilter::default(),
+        ),
+        // Reference, single verse, id resolution.
+        (
+            "reference, id",
+            "JHN 3:16",
+            Some(TRANSLATION),
+            SearchFilter::default(),
+        ),
+        // Reference, verse range, name resolution.
+        (
+            "reference, range",
+            "gen 1:1-5",
+            Some(TRANSLATION),
+            SearchFilter::default(),
+        ),
+        // Lexicon — 0 hits until a lexicon dataset is installed.
+        ("lexicon", "H430", None, SearchFilter::default()),
+        // Text search restricted to Psalms.
+        (
+            "text, filtered to PSA",
             "God",
             Some(TRANSLATION),
             SearchFilter {
                 book_ids: vec!["PSA".into()],
-                old_testament_only: false,
-                new_testament_only: false,
+                ..SearchFilter::default()
+            },
+        ),
+        // Phrase mode: "love God" must be adjacent, not just both
+        // tokens present. Compare the hit count against the
+        // multi-word query above — phrase mode should return fewer.
+        (
+            "text, phrase mode",
+            "love God",
+            Some(TRANSLATION),
+            SearchFilter {
+                mode: SearchMode::Phrase,
+                ..SearchFilter::default()
+            },
+        ),
+        // Regex mode: `\bLord\b` matches the whole word "Lord" and
+        // "LORD" (case-insensitive), but not "Lordship". Bypasses
+        // FTS5 entirely — scans verse text with the compiled regex.
+        (
+            "text, regex mode",
+            r"(?i)\bLord\b",
+            Some(TRANSLATION),
+            SearchFilter {
+                mode: SearchMode::Regex,
+                ..SearchFilter::default()
             },
         ),
     ];
 
-    for (query, tid, filter) in queries {
+    for (label, query, tid, filter) in queries {
         info!("\n════════════════════════════════════════");
+        info!("[{label}]");
         info!("Query: {query:?}   translation={tid:?}   filter={filter:?}");
         info!("────────────────────────────────────────");
 
@@ -100,7 +154,7 @@ fn main() {
 
         match result {
             Ok(results) => {
-                println!(
+                info!(
                     "  → {} hit(s) in {} ms  (total: {})",
                     results.hits.len(),
                     results.took_ms,

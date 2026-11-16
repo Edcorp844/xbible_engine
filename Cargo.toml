@@ -5,9 +5,6 @@ edition = "2024"
 
 [dependencies]
 directories = "5.0"
-fnv = "1.0.7"
-isolang = "2.4.0"
-roxmltree = "0.21.1"
 regex = "1.12.3"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
@@ -20,7 +17,6 @@ image = { version = "0.25.10", default-features = false, features = [
 ] }
 reqwest = { version = "0.13.4", features = ["json", "stream", "blocking"] }
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "fs"] }
-futures-util = { version = "0.3.32", features = ["alloc"] }
 bytes = "1.11.1"
 log = { version = "0.4.33", features = ["release_max_level_info"] }
 walkdir = "2.5.0"
@@ -36,12 +32,6 @@ uniffi = { version = "0.32.2", features = [
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]
 
-[build-dependencies]
-bindgen = "0.72.1"
-cmake = "0.1"
-toml = "0.7"
-pkg-config = "0.3"
-
 # Android -> Logcat
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.13"
@@ -56,3 +46,21 @@ env_logger = "0.11.11"
 
 [target.'cfg(target_os = "ios")'.dependencies]
 bzip2-sys = "0.1"
+
+[lints.clippy]
+pedantic = {level = "deny", priority = -1}
+nursery = {level = "deny", priority = -1}
+#DENY PANICS:
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+arithimetic_side_effects = "deny"
+unreachable = "deny"
+unimplemented = "deny"
+unchecked_time_subtraction = "deny"
+todo = "deny"
+string_slice = "deny"
+panic_in_result_fn = "deny"
+panic = "deny"
+exit = "deny"
+as_conversions = "deny"

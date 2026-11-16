@@ -482,7 +482,7 @@ fn search_filter_restricts_to_book() {
     )
     .unwrap();
 
-    // No filter: both verses returned.
+    // ── No filter: both verses returned ────────────────────────
     let no_filter = xbible_engine::engines::freebible_engine::search::search(
         &conn,
         "God",
@@ -494,7 +494,7 @@ fn search_filter_restricts_to_book() {
     .unwrap();
     assert_eq!(no_filter.total_hits, 2);
 
-    // Filter to Psalms only: one verse returned.
+    // ── Filter to Psalms only: one verse returned ──────────────
     let psa_only = xbible_engine::engines::freebible_engine::search::search(
         &conn,
         "God",
@@ -502,8 +502,7 @@ fn search_filter_restricts_to_book() {
         10,
         SearchFilter {
             book_ids: vec!["PSA".into()],
-            old_testament_only: false,
-            new_testament_only: false,
+            ..SearchFilter::default()
         },
         |_| {},
     )
@@ -511,35 +510,153 @@ fn search_filter_restricts_to_book() {
     assert_eq!(psa_only.total_hits, 1);
     assert_eq!(psa_only.hits[0].book_id, "PSA");
 
-    // Old Testament flag: both verses are in the OT, so both returned.
+    // ── Old Testament flag: both verses are in the OT ─────────
     let ot = xbible_engine::engines::freebible_engine::search::search(
         &conn,
         "God",
         Some("TST"),
         10,
         SearchFilter {
-            book_ids: vec![],
             old_testament_only: true,
-            new_testament_only: false,
+            ..SearchFilter::default()
         },
         |_| {},
     )
     .unwrap();
     assert_eq!(ot.total_hits, 2);
 
-    // New Testament flag: neither verse is in the NT, so zero returned.
+    // ── New Testament flag: neither verse is in the NT ────────
     let nt = xbible_engine::engines::freebible_engine::search::search(
         &conn,
         "God",
         Some("TST"),
         10,
         SearchFilter {
-            book_ids: vec![],
-            old_testament_only: false,
             new_testament_only: true,
+            ..SearchFilter::default()
         },
         |_| {},
     )
     .unwrap();
     assert_eq!(nt.total_hits, 0);
+}
+
+// ── Search mode ────────────────────────────────────────────────
+
+#[test]
+fn search_mode_phrase_requires_adjacent_words() {
+    let db = TempDb::new("mode_phrase");
+    let conn = xbible_engine::db::open(db.path()).expect("open failed");
+
+    conn.execute(
+        "INSERT INTO translations
+            (id, name, english_name, short_name, language, text_direction,
+             number_of_books, total_number_of_chapters, total_number_of_verses,
+             installed, has_strongs)
+         VALUES ('TST','Test','Test','TST','eng','ltr',1,1,3,0,0)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO books (translation_id, id, name, number_of_chapters)
+         VALUES ('TST','JHN','John',1)",
+        [],
+    )
+    .unwrap();
+
+    // Three verses, all containing "love" and "God" but in different
+    // orders and adjacencies:
+    //   1. "love God"       — adjacent, in order
+    //   2. "God is love"    — non-adjacent, reversed
+    //   3. "God's love"     — non-adjacent, apostrophe
+    conn.execute(
+        "INSERT INTO verses (translation_id, book_id, chapter, verse, text)
+         VALUES ('TST','JHN',1,1,'love God'),
+                ('TST','JHN',1,2,'God is love'),
+                ('TST','JHN',1,3,'God''s love')",
+        [],
+    )
+    .unwrap();
+
+    // Multi-word: all three verses contain both tokens.
+    let multi = xbible_engine::engines::freebible_engine::search::search(
+        &conn,
+        "love God",
+        Some("TST"),
+        10,
+        SearchFilter {
+            mode: xbible_engine::engines::freebible_engine::search::SearchMode::MultiWord,
+            ..SearchFilter::default()
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(multi.total_hits, 3, "multi-word should match all three");
+
+    // Phrase: only the adjacent, in-order occurrence matches.
+    let phrase = xbible_engine::engines::freebible_engine::search::search(
+        &conn,
+        "love God",
+        Some("TST"),
+        10,
+        SearchFilter {
+            mode: xbible_engine::engines::freebible_engine::search::SearchMode::Phrase,
+            ..SearchFilter::default()
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(phrase.total_hits, 1, "phrase should match only verse 1");
+    assert_eq!(phrase.hits[0].verse, 1);
+}
+
+#[test]
+fn search_mode_regex_matches_pattern() {
+    let db = TempDb::new("mode_regex");
+    let conn = xbible_engine::db::open(db.path()).expect("open failed");
+
+    conn.execute(
+        "INSERT INTO translations
+            (id, name, english_name, short_name, language, text_direction,
+             number_of_books, total_number_of_chapters, total_number_of_verses,
+             installed, has_strongs)
+         VALUES ('TST','Test','Test','TST','eng','ltr',1,1,2,0,0)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO books (translation_id, id, name, number_of_chapters)
+         VALUES ('TST','PSA','Psalms',1)",
+        [],
+    )
+    .unwrap();
+
+    // Two verses. Only the first ends with a word starting with "L".
+    conn.execute(
+        "INSERT INTO verses (translation_id, book_id, chapter, verse, text)
+         VALUES ('TST','PSA',1,1,'The LORD is my shepherd'),
+                ('TST','PSA',1,2,'I shall not want')",
+        [],
+    )
+    .unwrap();
+
+    let result = xbible_engine::engines::freebible_engine::search::search(
+        &conn,
+        r"LORD\b",
+        Some("TST"),
+        10,
+        SearchFilter {
+            mode: xbible_engine::engines::freebible_engine::search::SearchMode::Regex,
+            ..SearchFilter::default()
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(result.total_hits, 1, "only verse 1 contains LORD");
+    assert_eq!(result.hits[0].verse, 1);
+    assert_eq!(result.hits[0].book_id, "PSA");
+
+    // Regex hit has no pre-computed highlights — the UI computes
+    // them from the same pattern if it wants to render them.
+    assert!(result.hits[0].highlights.is_empty());
 }
