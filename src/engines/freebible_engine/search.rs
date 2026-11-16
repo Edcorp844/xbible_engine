@@ -16,24 +16,16 @@
 //!    another round-trip: translation, book, chapter, verse, text,
 //!    rank score, and byte-range highlights.
 //!
-//! ## Why FTS5 for text and not `LIKE`
+//! ## Filters
 //!
-//! `LIKE '%shepherd%'` cannot use an index; it scans every verse row.
-//! For one translation that is ~31,000 rows and ~50 ms. For five it is
-//! ~150,000 rows and ~500 ms on Android mid-range hardware. FTS5 keeps
-//! an inverted index and answers the same query in ~1 ms, and returns
-//! BM25-ranked results for free. The FTS table is populated by
-//! triggers on `verses`, so the install path needed no changes.
-//!
-//! ## Why regex bypasses FTS5
-//!
-//! FTS5 has no regex support. A regex is an arbitrary pattern over the
-//! text, which the inverted index cannot answer. Regex search scans
-//! every verse's text with a compiled regex — ~200 ms for one
-//! translation. It is slower than FTS5 but it is the only way to
-//! support arbitrary patterns. The same `SearchFilter` constrains it
-//! to one book or testament, so "regex over Psalms" scans 2,461 rows,
-//! not 31,086.
+//! [`SearchFilter`] carries a list of book IDs. Empty means "search
+//! every book". An explicit list constrains to those books. The
+//! engine does **not** know what "Old Testament" or "Apocrypha" means
+//! — that knowledge lives in `book_metadata.section`, and the UI
+//! builds the `book_ids` list from whatever sections it wants to
+//! include. This is what makes the filter work correctly for a
+//! translation that includes the Apocrypha, or one that reorders the
+//! canon.
 //!
 //! ## Search modes
 //!
@@ -47,20 +39,10 @@
 //!   surface a clear "regex" toggle so users do not type
 //!   `(` accidentally.
 //!
-//! ## Filters
-//!
-//! [`SearchFilter`] constrains a search to one translation, a list of
-//! books, or a testament. All three combine with `AND`. An explicit
-//! `book_ids` list wins over the testament flags — a user who picks
-//! "Psalms" and "Old Testament" means "Psalms", not "all OT books".
-//!
 //! ## Progress reporting
 //!
 //! [`search`] emits [`SearchProgress`] events between phases:
-//! Classifying → Resolving → Querying → Ranking → Done. For a 1 ms
-//! search these fire faster than the UI can render, so they are
-//! primarily useful for the app to log a slow search or to show a
-//! spinner while the FTS index is being paged in on first use.
+//! Classifying → Resolving → Querying → Ranking → Done.
 //!
 //! ## Highlighting
 //!
@@ -82,71 +64,45 @@ use crate::engines::freebible_engine::error::FreeBibleError;
 // ═══════════════════════════════════════════════════════════════
 
 /// A byte range into `SearchHit.text` that matched the query.
-///
-/// `start` is inclusive, `end` is exclusive. Both are UTF-8 byte
-/// offsets into the string, which for ASCII and Latin-1 text equals
-/// the character offset. The UI slices `hit.text[start..end]` to
-/// extract the matched substring.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct HighlightSpan {
-    /// Byte offset where the match starts.
     pub start: u32,
-    /// Byte offset where the match ends (exclusive).
     pub end: u32,
 }
 
 /// How a text query is interpreted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, uniffi::Enum)]
 pub enum SearchMode {
-    /// All words must appear, any order. `love God` matches
-    /// "God is love".
     #[default]
     MultiWord,
-
-    /// The words must appear as an exact adjacent sequence.
-    /// `love God` matches only "love God".
     Phrase,
-
-    /// Regular expression over the verse text. Slower than FTS5;
-    /// bypasses the inverted index entirely.
     Regex,
 }
 
 /// Constraints on a search.
 ///
-/// All fields are optional. `SearchFilter::default()` means "search
-/// everything, multi-word mode", which is the correct behavior for a
-/// frontend that does not expose filters.
+/// `SearchFilter::default()` means "search every book, multi-word
+/// mode". An explicit `book_ids` list constrains the search to those
+/// books. The engine does not know what a canon is — the UI computes
+/// the list from `book_metadata.section` before calling `search`.
 #[derive(Debug, Clone, Default, uniffi::Record)]
 pub struct SearchFilter {
-    /// Only search within these book IDs (`"PSA"`, `"JHN"`, …). Empty
-    /// means all books. An explicit list overrides the testament flags
-    /// below.
+    /// Only search within these book IDs (`"PSA"`, `"JHN"`, …).
+    /// Empty means all books.
     pub book_ids: Vec<String>,
-
-    /// Search only the Old Testament (39 books).
-    pub old_testament_only: bool,
-
-    /// Search only the New Testament (27 books).
-    pub new_testament_only: bool,
 
     /// How to interpret the text query. Applies only to text search;
     /// references and Strong's lookups ignore it.
     pub mode: SearchMode,
 }
 
-/// One step of the search pipeline. Emitted via [`SearchProgress`].
+/// One step of the search pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum SearchPhase {
-    /// Parsing the query into Reference / Strongs / Text.
     Classifying,
-    /// Looking up the book or lexicon entry in the DB.
     Resolving,
-    /// Running the FTS5 or regex query.
     Querying,
-    /// Sorting and counting the results.
     Ranking,
-    /// Returning the final [`SearchResults`].
     Done,
 }
 
@@ -155,15 +111,12 @@ pub enum SearchPhase {
 pub struct SearchProgress {
     pub phase: SearchPhase,
     pub message: String,
-    /// 0.0 → 1.0, best-effort. Phases that do no measurable work
-    /// emit a fixed fraction rather than a fake percentage.
     pub fraction: f64,
 }
 
 /// One result of a search.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct SearchHit {
-    /// `"verse"` | `"reference"` | `"lexicon"`
     pub kind: String,
     pub translation_id: String,
     pub book_id: String,
@@ -171,11 +124,7 @@ pub struct SearchHit {
     pub chapter: i32,
     pub verse: i32,
     pub text: String,
-    /// Lower is better for BM25. Ignored for reference and lexicon
-    /// hits, which always return `0.0`.
     pub score: f64,
-    /// Byte ranges in `text` that matched the query. Empty for
-    /// reference and lexicon hits — only text search highlights.
     pub highlights: Vec<HighlightSpan>,
 }
 
@@ -184,9 +133,6 @@ pub struct SearchHit {
 pub struct SearchResults {
     pub query: String,
     pub hits: Vec<SearchHit>,
-    /// Total hits across the whole result set, not just `hits.len()`.
-    /// For a search with `limit = 20` and 62 total matches,
-    /// `hits.len() == 20` and `total_hits == 62`.
     pub total_hits: i32,
     pub took_ms: i64,
 }
@@ -195,36 +141,25 @@ pub struct SearchResults {
 // Query classification
 // ═══════════════════════════════════════════════════════════════
 
-/// What kind of query the user typed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryKind {
-    /// `"JHN 3:16"`, `"john 3"`, `"gen 1:1-5"`, `"1 cor 13"`
     Reference {
         book: String,
         chapter: i32,
         verse: Option<i32>,
         end_verse: Option<i32>,
     },
-    /// `"H430"`, `"G26"`
     Strongs(String),
-    /// `"shepherd"`, `"love of God"`, `"ACAKI"`
     Text(String),
 }
 
 /// Parse a user query into one of the three shapes.
-///
-/// Deliberately simple: it recognizes the forms users actually type
-/// for Bible search. It does not try to be a general NLP parser, and
-/// it never falls back to a "did you mean" guess — an unparseable
-/// reference is treated as text search, which is what the user
-/// expects when they typed a word.
 pub fn classify(query: &str) -> QueryKind {
     let trimmed = query.trim();
     if trimmed.is_empty() {
         return QueryKind::Text(String::new());
     }
 
-    // Strong's: H or G followed by 1-4 digits, whole token.
     let upper = trimmed.to_uppercase();
     if let Some(rest) = upper.strip_prefix('H').or_else(|| upper.strip_prefix('G')) {
         if !rest.is_empty() && rest.len() <= 4 && rest.chars().all(|c| c.is_ascii_digit()) {
@@ -251,17 +186,7 @@ struct ParsedRef {
     end_verse: Option<i32>,
 }
 
-/// Parse forms like:
-///   `"JHN 3:16"`, `"john 3"`, `"gen 1:1-5"`, `"1 cor 13"`, `"1cor13"`
-///
-/// The book part is the leading alphabetic tokens (with optional
-/// leading number); the rest is `chapter[:verse[-endverse]]`. Returns
-/// `None` if the shape does not match — the caller then treats the
-/// query as text search.
 fn parse_reference(input: &str) -> Option<ParsedRef> {
-    // Split at the first digit that comes *after* at least one
-    // alphabetic char. That handles "1 cor 13" (book name starts
-    // with a digit) without splitting at the "1".
     let mut split_at = None;
     let mut seen_alpha = false;
     for (i, ch) in input.char_indices() {
@@ -281,7 +206,6 @@ fn parse_reference(input: &str) -> Option<ParsedRef> {
         return None;
     }
 
-    // Normalize the book name: lowercase, strip spaces and dots.
     let book_norm: String = book_part
         .chars()
         .filter(|c| c.is_alphanumeric())
@@ -325,26 +249,6 @@ fn parse_reference(input: &str) -> Option<ParsedRef> {
 // Highlighting
 // ═══════════════════════════════════════════════════════════════
 
-/// Find every occurrence of `query`'s tokens in `text`,
-/// case-insensitively, and return byte spans.
-///
-/// Multi-word queries return spans for each token separately, sorted
-/// by position. Phrase queries return the single span for the whole
-/// phrase. Regex queries should not call this — the UI computes
-/// highlights from the regex match positions directly.
-///
-/// Tokenization mirrors [`build_fts_query`]: split on whitespace,
-/// strip surrounding quotes, lowercase. This is not a full Unicode
-/// word-boundary search, but it matches what FTS5 indexed, which is
-/// what the user sees highlighted.
-///
-/// **Byte-offset caveat:** `text.to_lowercase()` can change byte
-/// length (`ß` → `ss`, `İ` → `i̇`). For ASCII and Latin-1 text — which
-/// covers BSB, KJV, and ach_abr — lowercasing is
-/// byte-length-preserving and the offsets are exact. For text with
-/// combining marks they may be off by a byte or two, which is
-/// acceptable for highlighting. A fully Unicode-correct version
-/// needs char-index mapping, which is a v8 concern.
 fn compute_highlights(text: &str, query: &str) -> Vec<HighlightSpan> {
     let tokens: Vec<String> = query
         .split_whitespace()
@@ -384,16 +288,6 @@ fn compute_highlights(text: &str, query: &str) -> Vec<HighlightSpan> {
 // Book resolution
 // ═══════════════════════════════════════════════════════════════
 
-/// Resolve a normalized book name (lowercase alphanumeric) against
-/// the `books` table. Matches, in priority order:
-///
-/// 1. exact `id` (case-insensitive) — `"jhn"`
-/// 2. exact `name` (case-insensitive, alnum-only) — `"john"`
-/// 3. `name` prefix — `"joh"` matches "John"
-///
-/// Ambiguity (e.g. `"jo"` matching "Job" and "John") is resolved by
-/// the first match in `id` order, which for a standard translation
-/// is canonical book order.
 fn resolve_book(conn: &Connection, translation_id: &str, book_norm: &str) -> Option<String> {
     if let Ok(id) = conn.query_row(
         "SELECT id FROM books WHERE translation_id = ?1 AND LOWER(id) = ?2",
@@ -435,16 +329,6 @@ fn resolve_book(conn: &Connection, translation_id: &str, book_norm: &str) -> Opt
 // The search pipeline
 // ═══════════════════════════════════════════════════════════════
 
-/// Execute a search and return the results.
-///
-/// This is the only public entry point. It classifies the query,
-/// dispatches to the appropriate backend, and returns a
-/// [`SearchResults`] with hits, total count, and timing.
-///
-/// `on_progress` is called between phases. For a 1 ms search the
-/// events fire faster than the UI can render; the primary use is
-/// logging a slow search or showing a spinner while the FTS index
-/// pages in on first use.
 pub fn search(
     conn: &Connection,
     query: &str,
@@ -521,9 +405,6 @@ pub fn search(
 // Text search — dispatch by mode
 // ═══════════════════════════════════════════════════════════════
 
-/// Dispatch a text query to the FTS5 backend (multi-word, phrase)
-/// or the regex backend. The two paths share the same
-/// [`SearchFilter`] but use entirely different SQL.
 fn search_text(
     conn: &Connection,
     text: &str,
@@ -544,14 +425,9 @@ fn search_text(
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Text search — FTS5 backend (multi-word, phrase)
+// Text search — FTS5 backend
 // ═══════════════════════════════════════════════════════════════
 
-/// Build one `SearchHit` from an FTS5 result row.
-///
-/// The `query` is the raw user text, used to compute highlight
-/// spans against the joined `verses.text`. The FTS5 rank is the
-/// BM25 score; lower is better.
 fn make_text_hit(r: &rusqlite::Row<'_>, query: &str) -> rusqlite::Result<SearchHit> {
     let text: String = r.get(5)?;
     let highlights = compute_highlights(&text, query);
@@ -568,13 +444,13 @@ fn make_text_hit(r: &rusqlite::Row<'_>, query: &str) -> rusqlite::Result<SearchH
     })
 }
 
-/// FTS5 text search with dynamic filters.
+/// FTS5 text search with the book filter applied.
 ///
-/// The `WHERE` clause is built from three optional constraints:
-/// `translation_id`, an explicit `book_ids` list, and the
-/// testament flags. Each constraint reserves a contiguous range of
-/// `?N` placeholders, so the final SQL has the right number of
-/// parameters without the caller having to count.
+/// The `WHERE` clause is built from at most two constraints:
+/// `translation_id` (optional) and `book_ids` (from the filter).
+/// No testament flag exists here because the engine does not know
+/// what a canon is. The UI computes `book_ids` from
+/// `book_metadata.section` before calling search.
 fn search_text_fts(
     conn: &Connection,
     text: &str,
@@ -584,24 +460,8 @@ fn search_text_fts(
 ) -> Result<(Vec<SearchHit>, i32), FreeBibleError> {
     let fts_query = build_fts_query(text, filter.mode)?;
 
-    // Canonical book ID lists. Kept here so the frontend does not
-    // have to know which books belong to which testament. Every
-    // installed translation uses these same USFM-style IDs.
-    const OT_IDS: &[&str] = &[
-        "GEN", "EXO", "LEV", "NUM", "DEU", "JOS", "JDG", "RUT", "1SA", "2SA", "1KI", "2KI", "1CH",
-        "2CH", "EZR", "NEH", "EST", "JOB", "PSA", "PRO", "ECC", "SNG", "ISA", "JER", "LAM", "EZK",
-        "DAN", "HOS", "JOL", "AMO", "OBA", "JON", "MIC", "NAM", "HAB", "ZEP", "HAG", "ZEC", "MAL",
-    ];
-    const NT_IDS: &[&str] = &[
-        "MAT", "MRK", "LUK", "JHN", "ACT", "ROM", "1CO", "2CO", "GAL", "EPH", "PHP", "COL", "1TH",
-        "2TH", "1TI", "2TI", "TIT", "PHM", "HEB", "JAS", "1PE", "2PE", "1JN", "2JN", "3JN", "JUD",
-        "REV",
-    ];
-
-    // ── Build the dynamic WHERE clause ──────────────────────────
-    //
-    // Bind order matters: ?1 is always the FTS query, then optional
-    // translation_id, then the book list, then limit.
+    // Bind order: ?1 = FTS query, optional translation_id, then the
+    // explicit book list, then limit.
     let mut where_clauses = vec!["f.verses_fts MATCH ?1".to_string()];
     let mut bind_idx = 2;
 
@@ -610,33 +470,7 @@ fn search_text_fts(
         bind_idx += 1;
     }
 
-    // Which book IDs to constrain to, if any. An explicit list wins
-    // over the testament flags: a user who picks "Psalms" and "Old
-    // Testament" means "Psalms", not "all OT books".
-    let explicit_books: Option<&[String]> = if !filter.book_ids.is_empty() {
-        Some(&filter.book_ids)
-    } else {
-        None
-    };
-
-    let testament_ids: Option<&[&str]> = if explicit_books.is_some() {
-        None
-    } else if filter.old_testament_only {
-        Some(OT_IDS)
-    } else if filter.new_testament_only {
-        Some(NT_IDS)
-    } else {
-        None
-    };
-
-    let num_book_params = if let Some(books) = explicit_books {
-        books.len()
-    } else if let Some(ids) = testament_ids {
-        ids.len()
-    } else {
-        0
-    };
-
+    let num_book_params = filter.book_ids.len();
     if num_book_params > 0 {
         let placeholders = (0..num_book_params)
             .map(|i| format!("?{}", bind_idx + i))
@@ -665,12 +499,6 @@ fn search_text_fts(
     })?;
 
     // ── Bind parameters dynamically ────────────────────────────
-    //
-    // Order must match the ?1..?N placeholders in the SQL above:
-    //   1. fts_query
-    //   2. translation_id (if present)
-    //   3..N+2. book list
-    //   N+3. limit
     let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(limit_param as usize);
     param_values.push(Box::new(fts_query.clone()));
 
@@ -678,14 +506,8 @@ fn search_text_fts(
         param_values.push(Box::new(tid.to_string()));
     }
 
-    if let Some(books) = explicit_books {
-        for id in books {
-            param_values.push(Box::new(id.clone()));
-        }
-    } else if let Some(ids) = testament_ids {
-        for id in ids {
-            param_values.push(Box::new((*id).to_string()));
-        }
+    for id in &filter.book_ids {
+        param_values.push(Box::new(id.clone()));
     }
 
     param_values.push(Box::new(limit));
@@ -701,9 +523,6 @@ fn search_text_fts(
         .collect();
 
     // ── Count query ────────────────────────────────────────────
-    //
-    // Same WHERE clause, no LIMIT. Reuse the same parameter slice
-    // except drop the trailing `limit` value.
     let count_sql = format!(
         "SELECT COUNT(*)
          FROM verses_fts f
@@ -723,19 +542,6 @@ fn search_text_fts(
 // Text search — regex backend
 // ═══════════════════════════════════════════════════════════════
 
-/// Regex search over `verses.text`.
-///
-/// This does not use FTS5 at all — it scans every verse that passes
-/// the book/translation filter. For a filter that constrains to one
-/// book, the scan is a few thousand rows; for an unconstrained
-/// search it is the whole translation. Either way it is slower than
-/// FTS5 (200 ms vs 1 ms for BSB) but it is the only way to support
-/// arbitrary patterns.
-///
-/// Highlights are not computed here. The UI has the same regex, so
-/// it can compute match positions itself without another round-trip.
-/// The cost is a one-line `regex.findAll()` in the frontend vs a
-/// byte-offset conversion in Rust that is easy to get wrong.
 fn search_text_regex(
     conn: &Connection,
     pattern: &str,
@@ -745,24 +551,10 @@ fn search_text_regex(
 ) -> Result<(Vec<SearchHit>, i32), FreeBibleError> {
     use regex::Regex;
 
-    // Compile once. A bad pattern returns a clear error, not a
-    // silent zero-hit result.
     let re = Regex::new(pattern).map_err(|e| FreeBibleError::Generic {
         error_message: format!("invalid regex {pattern:?}: {e}"),
     })?;
 
-    const OT_IDS: &[&str] = &[
-        "GEN", "EXO", "LEV", "NUM", "DEU", "JOS", "JDG", "RUT", "1SA", "2SA", "1KI", "2KI", "1CH",
-        "2CH", "EZR", "NEH", "EST", "JOB", "PSA", "PRO", "ECC", "SNG", "ISA", "JER", "LAM", "EZK",
-        "DAN", "HOS", "JOL", "AMO", "OBA", "JON", "MIC", "NAM", "HAB", "ZEP", "HAG", "ZEC", "MAL",
-    ];
-    const NT_IDS: &[&str] = &[
-        "MAT", "MRK", "LUK", "JHN", "ACT", "ROM", "1CO", "2CO", "GAL", "EPH", "PHP", "COL", "1TH",
-        "2TH", "1TI", "2TI", "TIT", "PHM", "HEB", "JAS", "1PE", "2PE", "1JN", "2JN", "3JN", "JUD",
-        "REV",
-    ];
-
-    // ── Build the dynamic WHERE clause ──────────────────────────
     let mut where_clauses = vec!["1=1".to_string()];
     let mut bind_idx = 1;
 
@@ -771,29 +563,7 @@ fn search_text_regex(
         bind_idx += 1;
     }
 
-    let explicit_books: Option<&[String]> = if !filter.book_ids.is_empty() {
-        Some(&filter.book_ids)
-    } else {
-        None
-    };
-    let testament_ids: Option<&[&str]> = if explicit_books.is_some() {
-        None
-    } else if filter.old_testament_only {
-        Some(OT_IDS)
-    } else if filter.new_testament_only {
-        Some(NT_IDS)
-    } else {
-        None
-    };
-
-    let num_book_params = if let Some(books) = explicit_books {
-        books.len()
-    } else if let Some(ids) = testament_ids {
-        ids.len()
-    } else {
-        0
-    };
-
+    let num_book_params = filter.book_ids.len();
     if num_book_params > 0 {
         let placeholders = (0..num_book_params)
             .map(|i| format!("?{}", bind_idx + i))
@@ -815,42 +585,28 @@ fn search_text_regex(
         error_message: format!("search_text_regex prepare: {e}"),
     })?;
 
-    // ── Bind params ───────────────────────────────────────────
     let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     if let Some(tid) = translation_id {
         param_values.push(Box::new(tid.to_string()));
     }
-    if let Some(books) = explicit_books {
-        for id in books {
-            param_values.push(Box::new(id.clone()));
-        }
-    } else if let Some(ids) = testament_ids {
-        for id in ids {
-            param_values.push(Box::new((*id).to_string()));
-        }
+    for id in &filter.book_ids {
+        param_values.push(Box::new(id.clone()));
     }
 
     let params_refs: Vec<&dyn rusqlite::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
 
-    // ── Scan rows and filter by regex ────────────────────────
-    //
-    // No LIMIT in the SQL because the SQL does not know which rows
-    // the regex will match. We scan every row the filter allows,
-    // then take the first `limit` that match. For a translation
-    // with 31,000 verses that is 31,000 regex tests at ~6 µs each,
-    // which is ~200 ms — acceptable for a user-initiated search.
     let mut hits: Vec<SearchHit> = Vec::with_capacity(limit.max(0) as usize);
     let mut total: i32 = 0;
 
     let rows = stmt
         .query_map(&params_refs[..], |r| {
             Ok((
-                r.get::<_, String>(0)?,         // translation_id
-                r.get::<_, String>(1)?,         // book_id
-                r.get::<_, Option<String>>(2)?, // book_name
-                r.get::<_, i32>(3)?,            // chapter
-                r.get::<_, i32>(4)?,            // verse
-                r.get::<_, String>(5)?,         // text
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, i32>(3)?,
+                r.get::<_, i32>(4)?,
+                r.get::<_, String>(5)?,
             ))
         })
         .map_err(|e| FreeBibleError::Generic {
@@ -874,9 +630,6 @@ fn search_text_regex(
 
         total += 1;
 
-        // Only build the SearchHit for the first `limit` matches.
-        // Beyond that we still need to count so `total_hits` is
-        // accurate, but we don't need the full struct.
         if hits.len() < limit.max(0) as usize {
             hits.push(SearchHit {
                 kind: "verse".into(),
@@ -887,9 +640,7 @@ fn search_text_regex(
                 verse,
                 text,
                 score: 0.0,
-                // Highlights are left empty — the UI computes them
-                // from the same regex if it wants to render them.
-                highlights: highlights,
+                highlights,
             });
         }
     }
@@ -901,17 +652,6 @@ fn search_text_regex(
 // Reference search
 // ═══════════════════════════════════════════════════════════════
 
-/// Look up a Bible reference like `JHN 3:16` or `gen 1:1-5`.
-///
-/// Three shapes are possible:
-///   - `chapter` only: `gen 1` → every verse in Genesis 1
-///   - `chapter:verse`: `jhn 3:16` → exactly one verse
-///   - `chapter:verse-endverse`: `gen 1:1-5` → five verses
-///
-/// The book part is resolved against `books` with three tiers
-/// (exact id, exact name, name prefix). If the book is not found,
-/// this returns an empty result rather than an error — a user who
-/// types `zzz 1:1` should see "no results", not a crash.
 fn search_reference(
     conn: &Connection,
     translation_id: &str,
@@ -1005,11 +745,6 @@ fn search_reference(
 // Strong's search
 // ═══════════════════════════════════════════════════════════════
 
-/// Look up a Strong's number in the lexicon.
-///
-/// The lexicon is not per-translation — the same H430 entry applies
-/// to every installed Bible — so the translation filter does not
-/// apply here. Returns one hit per lexicon entry matching the id.
 fn search_strongs(
     conn: &Connection,
     strongs: &str,
@@ -1065,25 +800,6 @@ fn search_strongs(
 // FTS5 query construction
 // ═══════════════════════════════════════════════════════════════
 
-/// Build the FTS5 MATCH expression for `text` under `mode`.
-///
-/// - **MultiWord**: each whitespace-separated token is quoted and
-///   ANDed. `love God` → `"love" "God"`. Matches any verse that
-///   contains both tokens in any order.
-///
-/// - **Phrase**: the whole input is quoted as one phrase, with
-///   inner quotes escaped. `love God` → `"love God"`. Matches only
-///   the adjacent two-word sequence.
-///
-/// - **Regex**: returns an error, because regex does not go through
-///   FTS5. `search_text` checks the mode and takes a different path
-///   before it calls this.
-///
-/// Quoting every token (not just the multi-word case) is what
-/// prevents users from injecting FTS5 operators. `AND`, `OR`,
-/// `NEAR`, and `*` are all meaningful in raw FTS5 syntax; inside
-/// quotes they are literals. A user who types `love OR God` gets
-/// a search for the literal word `OR`, which is what they typed.
 fn build_fts_query(text: &str, mode: SearchMode) -> Result<String, FreeBibleError> {
     match mode {
         SearchMode::MultiWord => Ok(text
@@ -1113,8 +829,6 @@ fn build_fts_query(text: &str, mode: SearchMode) -> Result<String, FreeBibleErro
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── Classification ──────────────────────────────────────────
 
     #[test]
     fn classify_reference_id() {
@@ -1182,8 +896,6 @@ mod tests {
         assert_eq!(classify("love God"), QueryKind::Text("love God".into()));
     }
 
-    // ── FTS query construction ──────────────────────────────────
-
     #[test]
     fn fts_multiword_quotes_each_token() {
         assert_eq!(
@@ -1202,8 +914,6 @@ mod tests {
             build_fts_query("love God", SearchMode::Phrase).unwrap(),
             "\"love God\""
         );
-        // Inner quotes escape as "" so the whole thing stays one
-        // FTS5 phrase.
         assert_eq!(
             build_fts_query("say \"hello\"", SearchMode::Phrase).unwrap(),
             "\"say \"\"hello\"\"\""
@@ -1214,8 +924,6 @@ mod tests {
     fn fts_regex_mode_errors() {
         assert!(build_fts_query("love God", SearchMode::Regex).is_err());
     }
-
-    // ── Highlighting ────────────────────────────────────────────
 
     #[test]
     fn highlights_single_token() {
@@ -1240,5 +948,146 @@ mod tests {
     #[test]
     fn highlights_empty_query() {
         assert!(compute_highlights("anything", "").is_empty());
+    }
+
+    // ── Filter behaviour ────────────────────────────────────────
+    //
+    // These tests don't require a real DB. They only exercise the
+    // SQL construction by using an in-memory connection with the
+    // minimum schema the queries touch. The point is to prove the
+    // book filter actually restricts — not to prove FTS5 works
+    // (that's covered by the tests/db_smoke.rs integration suite).
+
+    fn temp_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE translations (
+                id TEXT PRIMARY KEY,
+                selected_canon TEXT NOT NULL DEFAULT 'protestant'
+            );
+            CREATE TABLE books (
+                translation_id TEXT NOT NULL,
+                id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                number_of_chapters INTEGER NOT NULL,
+                PRIMARY KEY (translation_id, id)
+            );
+            CREATE TABLE verses (
+                translation_id TEXT NOT NULL,
+                book_id TEXT NOT NULL,
+                chapter INTEGER NOT NULL,
+                verse INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                PRIMARY KEY (translation_id, book_id, chapter, verse)
+            );
+            CREATE VIRTUAL TABLE verses_fts USING fts5(
+                text,
+                content='',
+                tokenize='unicode61 remove_diacritics 2'
+            );
+            "#,
+        )
+        .unwrap();
+        conn
+    }
+
+    fn seed(
+        conn: &Connection,
+        translation_id: &str,
+        book_id: &str,
+        chapter: i32,
+        verse: i32,
+        text: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO verses (translation_id, book_id, chapter, verse, text)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![translation_id, book_id, chapter, verse, text],
+        )
+        .unwrap();
+        let rowid: i64 = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO verses_fts(rowid, text) VALUES (?1, ?2)",
+            params![rowid, text],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn filter_with_empty_book_ids_matches_everything() {
+        let conn = temp_conn();
+        seed(&conn, "TST", "GEN", 1, 1, "God created the heavens.");
+        seed(&conn, "TST", "PSA", 23, 1, "The LORD is my shepherd.");
+
+        let result = search(
+            &conn,
+            "God",
+            Some("TST"),
+            10,
+            SearchFilter::default(),
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(result.total_hits, 1, "only Genesis contains God");
+        assert_eq!(result.hits[0].book_id, "GEN");
+    }
+
+    #[test]
+    fn filter_with_book_ids_restricts_to_those_books() {
+        let conn = temp_conn();
+        seed(&conn, "TST", "GEN", 1, 1, "God created the heavens.");
+        seed(
+            &conn,
+            "TST",
+            "PSA",
+            23,
+            1,
+            "The LORD is my shepherd and God is with me.",
+        );
+
+        // No filter: both verses match "God".
+        let no_filter = search(
+            &conn,
+            "God",
+            Some("TST"),
+            10,
+            SearchFilter::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(no_filter.total_hits, 2);
+
+        // Filter to Psalms: only the Psalms verse.
+        let psa_only = search(
+            &conn,
+            "God",
+            Some("TST"),
+            10,
+            SearchFilter {
+                book_ids: vec!["PSA".into()],
+                ..SearchFilter::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(psa_only.total_hits, 1);
+        assert_eq!(psa_only.hits[0].book_id, "PSA");
+
+        // Filter to a book with no matching verses: zero results.
+        let jhn_only = search(
+            &conn,
+            "God",
+            Some("TST"),
+            10,
+            SearchFilter {
+                book_ids: vec!["JHN".into()],
+                ..SearchFilter::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(jhn_only.total_hits, 0);
     }
 }

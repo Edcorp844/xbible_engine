@@ -355,6 +355,49 @@ const MIGRATIONS: &[M<'_>] = &[
         END;
         "#,
     ),
+    // ── v8: book section ──────────────────────────────────────────
+    //
+    // `book_metadata.section` records which canonical group each
+    // book belongs to for the translation's selected canon. Values
+    // are short keys (see `install::section_for_book_id`), not
+    // labels: "ot", "nt", "deutero", "orthodox_extra",
+    // "ethiopian_extra", "unknown". The UI maps them to display
+    // names per translation, so a Catholic translation can show
+    // "Deuterocanonicals" where a Protestant one shows "Apocrypha".
+    //
+    // Default is "unknown" so a pre-v8 install is explicitly
+    // flagged as needing a rebuild rather than silently rendering
+    // every book under one group.
+    M::up(
+        r#"
+        ALTER TABLE book_metadata
+            ADD COLUMN section TEXT NOT NULL DEFAULT 'unknown';
+
+        CREATE INDEX IF NOT EXISTS idx_book_metadata_section
+            ON book_metadata (translation_id, section, book_order);
+        "#,
+    ),
+    // ── v9: per-translation canon selection ───────────────────────
+    //
+    // `translations.selected_canon` records which canonical family
+    // the scholar chose for this translation. Values are short keys:
+    // "protestant", "catholic", "orthodox", "ethiopian", "all".
+    // The reader filters `get_books` by the sections visible in
+    // this canon; "all" shows every section including "unknown".
+    //
+    // This is a display choice, not a content rewrite: switching
+    // canon hides or reveals books, it never deletes them. A
+    // scholar can switch from "Protestant" to "All" and see the
+    // deuterocanonicals already in the DB, then switch back.
+    //
+    // Default is "protestant" so existing installs keep behaving
+    // the way they did before the canon picker existed.
+    M::up(
+        r#"
+        ALTER TABLE translations
+            ADD COLUMN selected_canon TEXT NOT NULL DEFAULT 'protestant';
+        "#,
+    ),
 ];
 
 /// Apply every pending migration to `conn`, bringing it to
@@ -411,6 +454,7 @@ mod tests {
             "entity_install_state",
             "commentary_books",
             "commentary_chapters",
+            "verses_fts",
         ] {
             let exists: i32 = conn
                 .query_row(
@@ -426,10 +470,12 @@ mod tests {
             ("translations", "license_url"),
             ("translations", "license_notes"),
             ("translations", "raw_json"),
+            ("translations", "selected_canon"),
             ("commentaries", "license_notes"),
             ("commentaries", "raw_json"),
             ("datasets", "license_notes"),
             ("datasets", "raw_json"),
+            ("book_metadata", "section"),
         ] {
             let has: i32 = conn
                 .query_row(

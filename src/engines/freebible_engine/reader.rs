@@ -72,6 +72,10 @@ pub struct InstalledTranslation {
     pub book_count: i32,
     pub chapter_count: i32,
     pub verse_count: i32,
+    /// The canonical family this translation is currently showing.
+    /// One of: "protestant", "catholic", "orthodox", "ethiopian",
+    /// "all". See `set_selected_canon`.
+    pub selected_canon: String,
 }
 
 // Entity Models (Moved from store_api)
@@ -163,7 +167,6 @@ pub struct GroupDetail {
 
 // ── DB Helpers ───────────────────────────────────────────────────
 
-// Helper functions to read relations
 fn read_forward_refs(
     conn: &Connection,
     dataset_id: &str,
@@ -323,6 +326,33 @@ fn parse_verse_words(raw_json: &str, fallback_text: String) -> Vec<ReaderVerse> 
     }]
 }
 
+// ── Canonical section visibility ─────────────────────────────────
+
+/// Sections visible under a given canon key.
+///
+/// An unrecognized canon key returns `["ot", "nt"]`, which is the
+/// safe default (Protestant). If a future canon key gets added to
+/// the DB but not to this function, the translation silently falls
+/// back to Protestant rather than showing nothing — the user can
+/// still switch to "all" to see everything.
+fn sections_for_canon(canon: &str) -> &'static [&'static str] {
+    match canon {
+        "protestant" => &["ot", "nt"],
+        "catholic" => &["ot", "nt", "deutero"],
+        "orthodox" => &["ot", "nt", "deutero", "orthodox_extra"],
+        "ethiopian" => &["ot", "nt", "deutero", "orthodox_extra", "ethiopian_extra"],
+        "all" => &[
+            "ot",
+            "nt",
+            "deutero",
+            "orthodox_extra",
+            "ethiopian_extra",
+            "unknown",
+        ],
+        _ => &["ot", "nt"],
+    }
+}
+
 #[uniffi::export(callback_interface)]
 pub trait SearchProgressListener: Send + Sync {
     fn on_progress(&self, progress: super::search::SearchProgress);
@@ -354,6 +384,7 @@ impl FreeBibleReader {
     }
 
     // ── Search ─────────────────────────────────────
+
     pub fn search(
         &self,
         query: String,
@@ -402,7 +433,8 @@ impl FreeBibleReader {
 
         let mut stmt = match conn.prepare(
             "SELECT id, name, english_name, short_name, language, language_name,
-                text_direction, number_of_books, total_number_of_chapters, total_number_of_verses
+                text_direction, number_of_books, total_number_of_chapters,
+                total_number_of_verses, selected_canon
          FROM translations WHERE installed = 1 ORDER BY name",
         ) {
             Ok(s) => s,
@@ -424,6 +456,7 @@ impl FreeBibleReader {
                 book_count: r.get(7)?,
                 chapter_count: r.get(8)?,
                 verse_count: r.get(9)?,
+                selected_canon: r.get(10)?,
             })
         });
 
@@ -444,20 +477,60 @@ impl FreeBibleReader {
         }
     }
 
+    /// Books visible under the translation's `selected_canon`, with
+    /// the canonical section attached.
     pub fn get_books(&self, translation_id: String) -> Vec<FreeBibleBook> {
-        let conn_arc = match self.conn.read().unwrap().clone() {
+        let conn_arc = match self.conn.read().unwrap_or_else(|p| p.into_inner()).clone() {
             Some(c) => c,
             None => return Vec::new(),
         };
-        let conn = conn_arc.lock().unwrap();
+        let conn = conn_arc.lock().unwrap_or_else(|p| p.into_inner());
 
-        let mut stmt = match conn.prepare(
-            "SELECT b.id, b.name, b.number_of_chapters, m.common_name, m.title, m.book_order, m.audio_links_json, m.raw_json
-             FROM books b LEFT JOIN book_metadata m ON m.translation_id = b.translation_id AND m.book_id = b.id
-             WHERE b.translation_id = ?1 ORDER BY COALESCE(m.book_order, 999999), b.id"
-        ) { Ok(s) => s, Err(_) => return Vec::new() };
+        let canon: String = conn
+            .query_row(
+                "SELECT COALESCE(selected_canon, 'protestant')
+                 FROM translations WHERE id = ?1",
+                rusqlite::params![translation_id],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "protestant".into());
 
-        let rows = stmt.query_map(rusqlite::params![translation_id], |r| {
+        let visible = sections_for_canon(&canon);
+        let placeholders = (0..visible.len())
+            .map(|i| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let sql = format!(
+            "SELECT b.id, b.name, b.number_of_chapters,
+                    m.common_name, m.title, m.book_order,
+                    m.audio_links_json, m.raw_json,
+                    COALESCE(m.section, 'unknown')
+             FROM books b
+             LEFT JOIN book_metadata m
+               ON m.translation_id = b.translation_id AND m.book_id = b.id
+             WHERE b.translation_id = ?1
+               AND COALESCE(m.section, 'unknown') IN ({placeholders})
+             ORDER BY COALESCE(m.book_order, 999999), b.id"
+        );
+
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("get_books prepare failed: {e}");
+                return Vec::new();
+            }
+        };
+
+        let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(visible.len() + 1);
+        param_values.push(Box::new(translation_id));
+        for section in visible {
+            param_values.push(Box::new((*section).to_string()));
+        }
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            param_values.iter().map(|b| b.as_ref()).collect();
+
+        let rows = stmt.query_map(&params_refs[..], |r| {
             Ok(FreeBibleBook {
                 id: r.get(0)?,
                 name: r.get(1)?,
@@ -467,6 +540,7 @@ impl FreeBibleReader {
                 book_order: r.get(5)?,
                 audio_links_json: r.get(6)?,
                 raw_json: r.get(7)?,
+                section: r.get(8)?,
             })
         });
 
@@ -474,6 +548,98 @@ impl FreeBibleReader {
             Ok(r) => r.filter_map(|x| x.ok()).collect(),
             Err(_) => Vec::new(),
         }
+    }
+
+    /// True if the translation was installed before v8, so its books
+    /// have no section data. The UI shows an "Update Required" banner
+    /// when this is true and offers `rebuild_sections`.
+    pub fn needs_section_update(&self, translation_id: String) -> Result<bool, FreeBibleError> {
+        let conn_arc = match self.conn.read().unwrap_or_else(|p| p.into_inner()).clone() {
+            Some(c) => c,
+            None => {
+                return Err(FreeBibleError::Generic {
+                    error_message: "reader has no connection — call setDbPath first".into(),
+                });
+            }
+        };
+        let conn = conn_arc.lock().unwrap_or_else(|p| p.into_inner());
+
+        let unknown_count: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM book_metadata
+                 WHERE translation_id = ?1 AND section = 'unknown'",
+                rusqlite::params![translation_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| FreeBibleError::Generic {
+                error_message: format!("needs_section_update query failed: {e}"),
+            })?;
+
+        Ok(unknown_count > 0)
+    }
+
+    /// Fill in `book_metadata.section` for every book of a translation
+    /// using the current `section_for_book_id` lookup. No-op for books
+    /// the lookup still does not know.
+    pub fn rebuild_sections(&self, translation_id: String) -> Result<i32, FreeBibleError> {
+        let conn_arc = match self.conn.read().unwrap_or_else(|p| p.into_inner()).clone() {
+            Some(c) => c,
+            None => {
+                return Err(FreeBibleError::Generic {
+                    error_message: "reader has no connection — call setDbPath first".into(),
+                });
+            }
+        };
+        let conn = conn_arc.lock().unwrap_or_else(|p| p.into_inner());
+
+        let changed = super::install::rebuild_sections_for_translation(&conn, &translation_id)?;
+        log::info!(
+            "rebuild_sections: {}/{} book(s) updated for {}",
+            changed,
+            changed,
+            translation_id
+        );
+        Ok(changed as i32)
+    }
+
+    /// Set which canonical family this translation shows. Does not
+    /// touch any book content — only `translations.selected_canon`.
+    pub fn set_selected_canon(
+        &self,
+        translation_id: String,
+        canon: String,
+    ) -> Result<(), FreeBibleError> {
+        const VALID: &[&str] = &["protestant", "catholic", "orthodox", "ethiopian", "all"];
+        if !VALID.contains(&canon.as_str()) {
+            return Err(FreeBibleError::Generic {
+                error_message: format!("unknown canon {canon:?} — expected one of {VALID:?}"),
+            });
+        }
+
+        let conn_arc = match self.conn.read().unwrap_or_else(|p| p.into_inner()).clone() {
+            Some(c) => c,
+            None => {
+                return Err(FreeBibleError::Generic {
+                    error_message: "reader has no connection — call setDbPath first".into(),
+                });
+            }
+        };
+        let conn = conn_arc.lock().unwrap_or_else(|p| p.into_inner());
+
+        let n = conn
+            .execute(
+                "UPDATE translations SET selected_canon = ?1 WHERE id = ?2",
+                rusqlite::params![canon, translation_id],
+            )
+            .map_err(|e| FreeBibleError::Generic {
+                error_message: format!("set_selected_canon update failed: {e}"),
+            })?;
+        if n == 0 {
+            return Err(FreeBibleError::Generic {
+                error_message: format!("translation {translation_id} not found"),
+            });
+        }
+        Ok(())
     }
 
     // ── Chapter Reading ──────────────────────────────────────────
@@ -733,14 +899,24 @@ impl FreeBibleReader {
         let conn_arc = self.conn.read().unwrap().clone()?;
         let conn = conn_arc.lock().unwrap();
 
-        let row = conn.query_row(
-            "SELECT name, kjv_name, esv_name, feature_type, latitude, longitude, description FROM places WHERE dataset_id = ?1 AND id = ?2",
-            rusqlite::params![dataset_id, id],
-            |r| Ok((
-                r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?,
-                r.get::<_, Option<f64>>(4)?, r.get::<_, Option<f64>>(5)?, r.get::<_, Option<String>>(6)?,
-            )),
-        ).ok()?;
+        let row = conn
+            .query_row(
+                "SELECT name, kjv_name, esv_name, feature_type, latitude, longitude, description
+             FROM places WHERE dataset_id = ?1 AND id = ?2",
+                rusqlite::params![dataset_id, id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<f64>>(4)?,
+                        r.get::<_, Option<f64>>(5)?,
+                        r.get::<_, Option<String>>(6)?,
+                    ))
+                },
+            )
+            .ok()?;
 
         Some(PlaceDetail {
             id: id.clone(),
@@ -779,17 +955,17 @@ impl FreeBibleReader {
         let conn = conn_arc.lock().unwrap();
 
         let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match query {
-            Some(q) if !q.trim().is_empty() => (
-                "SELECT id, name, is_proper_name, gender, NULL, (SELECT COUNT(*) FROM entity_refs WHERE dataset_id=?1 AND source_kind='person' AND source_id=people.id)
-                 FROM people WHERE dataset_id=?1 AND name LIKE ?2 ORDER BY name LIMIT ?3 OFFSET ?4".into(),
-                vec![Box::new(dataset_id.clone()), Box::new(format!("%{}%", q)), Box::new(limit), Box::new(offset)],
-            ),
-            _ => (
-                "SELECT id, name, is_proper_name, gender, NULL, (SELECT COUNT(*) FROM entity_refs WHERE dataset_id=?1 AND source_kind='person' AND source_id=people.id)
-                 FROM people WHERE dataset_id=?1 ORDER BY name LIMIT ?2 OFFSET ?3".into(),
-                vec![Box::new(dataset_id.clone()), Box::new(limit), Box::new(offset)],
-            ),
-        };
+                Some(q) if !q.trim().is_empty() => (
+                    "SELECT id, name, is_proper_name, gender, NULL, (SELECT COUNT(*) FROM entity_refs WHERE dataset_id=?1 AND source_kind='person' AND source_id=people.id)
+                     FROM people WHERE dataset_id=?1 AND name LIKE ?2 ORDER BY name LIMIT ?3 OFFSET ?4".into(),
+                    vec![Box::new(dataset_id.clone()), Box::new(format!("%{}%", q)), Box::new(limit), Box::new(offset)],
+                ),
+                _ => (
+                    "SELECT id, name, is_proper_name, gender, NULL, (SELECT COUNT(*) FROM entity_refs WHERE dataset_id=?1 AND source_kind='person' AND source_id=people.id)
+                     FROM people WHERE dataset_id=?1 ORDER BY name LIMIT ?2 OFFSET ?3".into(),
+                    vec![Box::new(dataset_id.clone()), Box::new(limit), Box::new(offset)],
+                ),
+            };
         let p: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
         let mut stmt = match conn.prepare(&sql) {
             Ok(s) => s,
@@ -824,17 +1000,17 @@ impl FreeBibleReader {
         let conn = conn_arc.lock().unwrap();
 
         let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match query {
-            Some(q) if !q.trim().is_empty() => (
-                "SELECT id, name, NULL, NULL, start_date, (SELECT COUNT(*) FROM entity_refs WHERE dataset_id=?1 AND source_kind='event' AND source_id=events.id)
-                 FROM events WHERE dataset_id=?1 AND name LIKE ?2 ORDER BY name LIMIT ?3 OFFSET ?4".into(),
-                vec![Box::new(dataset_id.clone()), Box::new(format!("%{}%", q)), Box::new(limit), Box::new(offset)],
-            ),
-            _ => (
-                "SELECT id, name, NULL, NULL, start_date, (SELECT COUNT(*) FROM entity_refs WHERE dataset_id=?1 AND source_kind='event' AND source_id=events.id)
-                 FROM events WHERE dataset_id=?1 ORDER BY name LIMIT ?2 OFFSET ?3".into(),
-                vec![Box::new(dataset_id.clone()), Box::new(limit), Box::new(offset)],
-            ),
-        };
+                Some(q) if !q.trim().is_empty() => (
+                    "SELECT id, name, NULL, NULL, start_date, (SELECT COUNT(*) FROM entity_refs WHERE dataset_id=?1 AND source_kind='event' AND source_id=events.id)
+                     FROM events WHERE dataset_id=?1 AND name LIKE ?2 ORDER BY name LIMIT ?3 OFFSET ?4".into(),
+                    vec![Box::new(dataset_id.clone()), Box::new(format!("%{}%", q)), Box::new(limit), Box::new(offset)],
+                ),
+                _ => (
+                    "SELECT id, name, NULL, NULL, start_date, (SELECT COUNT(*) FROM entity_refs WHERE dataset_id=?1 AND source_kind='event' AND source_id=events.id)
+                     FROM events WHERE dataset_id=?1 ORDER BY name LIMIT ?2 OFFSET ?3".into(),
+                    vec![Box::new(dataset_id.clone()), Box::new(limit), Box::new(offset)],
+                ),
+            };
         let p: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
         let mut stmt = match conn.prepare(&sql) {
             Ok(s) => s,
@@ -869,17 +1045,17 @@ impl FreeBibleReader {
         let conn = conn_arc.lock().unwrap();
 
         let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match query {
-            Some(q) if !q.trim().is_empty() => (
-                "SELECT id, name, NULL, NULL, feature_type, (SELECT COUNT(*) FROM entity_refs WHERE dataset_id=?1 AND source_kind='place' AND source_id=places.id)
-                 FROM places WHERE dataset_id=?1 AND name LIKE ?2 ORDER BY name LIMIT ?3 OFFSET ?4".into(),
-                vec![Box::new(dataset_id.clone()), Box::new(format!("%{}%", q)), Box::new(limit), Box::new(offset)],
-            ),
-            _ => (
-                "SELECT id, name, NULL, NULL, feature_type, (SELECT COUNT(*) FROM entity_refs WHERE dataset_id=?1 AND source_kind='place' AND source_id=places.id)
-                 FROM places WHERE dataset_id=?1 ORDER BY name LIMIT ?2 OFFSET ?3".into(),
-                vec![Box::new(dataset_id.clone()), Box::new(limit), Box::new(offset)],
-            ),
-        };
+                Some(q) if !q.trim().is_empty() => (
+                    "SELECT id, name, NULL, NULL, feature_type, (SELECT COUNT(*) FROM entity_refs WHERE dataset_id=?1 AND source_kind='place' AND source_id=places.id)
+                     FROM places WHERE dataset_id=?1 AND name LIKE ?2 ORDER BY name LIMIT ?3 OFFSET ?4".into(),
+                    vec![Box::new(dataset_id.clone()), Box::new(format!("%{}%", q)), Box::new(limit), Box::new(offset)],
+                ),
+                _ => (
+                    "SELECT id, name, NULL, NULL, feature_type, (SELECT COUNT(*) FROM entity_refs WHERE dataset_id=?1 AND source_kind='place' AND source_id=places.id)
+                     FROM places WHERE dataset_id=?1 ORDER BY name LIMIT ?2 OFFSET ?3".into(),
+                    vec![Box::new(dataset_id.clone()), Box::new(limit), Box::new(offset)],
+                ),
+            };
         let p: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
         let mut stmt = match conn.prepare(&sql) {
             Ok(s) => s,
@@ -914,17 +1090,17 @@ impl FreeBibleReader {
         let conn = conn_arc.lock().unwrap();
 
         let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match query {
-            Some(q) if !q.trim().is_empty() => (
-                "SELECT id, name, NULL, NULL, NULL, (SELECT COUNT(*) FROM entity_refs WHERE dataset_id=?1 AND source_kind='group' AND source_id=people_groups.id)
-                 FROM people_groups WHERE dataset_id=?1 AND name LIKE ?2 ORDER BY name LIMIT ?3 OFFSET ?4".into(),
-                vec![Box::new(dataset_id.clone()), Box::new(format!("%{}%", q)), Box::new(limit), Box::new(offset)],
-            ),
-            _ => (
-                "SELECT id, name, NULL, NULL, NULL, (SELECT COUNT(*) FROM entity_refs WHERE dataset_id=?1 AND source_kind='group' AND source_id=people_groups.id)
-                 FROM people_groups WHERE dataset_id=?1 ORDER BY name LIMIT ?2 OFFSET ?3".into(),
-                vec![Box::new(dataset_id.clone()), Box::new(limit), Box::new(offset)],
-            ),
-        };
+                Some(q) if !q.trim().is_empty() => (
+                    "SELECT id, name, NULL, NULL, NULL, (SELECT COUNT(*) FROM entity_refs WHERE dataset_id=?1 AND source_kind='group' AND source_id=people_groups.id)
+                     FROM people_groups WHERE dataset_id=?1 AND name LIKE ?2 ORDER BY name LIMIT ?3 OFFSET ?4".into(),
+                    vec![Box::new(dataset_id.clone()), Box::new(format!("%{}%", q)), Box::new(limit), Box::new(offset)],
+                ),
+                _ => (
+                    "SELECT id, name, NULL, NULL, NULL, (SELECT COUNT(*) FROM entity_refs WHERE dataset_id=?1 AND source_kind='group' AND source_id=people_groups.id)
+                     FROM people_groups WHERE dataset_id=?1 ORDER BY name LIMIT ?2 OFFSET ?3".into(),
+                    vec![Box::new(dataset_id.clone()), Box::new(limit), Box::new(offset)],
+                ),
+            };
         let p: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
         let mut stmt = match conn.prepare(&sql) {
             Ok(s) => s,
@@ -973,13 +1149,13 @@ impl FreeBibleReader {
             Some(r) => read_forward_refs(&conn, &dataset_id, &kind, &id, &[r.as_str()]),
             None => {
                 let mut stmt = match conn.prepare(
-                    "SELECT target_kind, target_id, COALESCE(target_name, target_id)
-                     FROM entity_refs WHERE dataset_id = ?1 AND source_kind = ?2 AND source_id = ?3
-                     ORDER BY relation, target_name",
-                ) {
-                    Ok(s) => s,
-                    Err(_) => return Vec::new(),
-                };
+                        "SELECT target_kind, target_id, COALESCE(target_name, target_id)
+                         FROM entity_refs WHERE dataset_id = ?1 AND source_kind = ?2 AND source_id = ?3
+                         ORDER BY relation, target_name",
+                    ) {
+                        Ok(s) => s,
+                        Err(_) => return Vec::new(),
+                    };
                 match stmt.query_map(rusqlite::params![dataset_id, kind, id], |row| {
                     Ok(EntityRef {
                         kind: row.get(0)?,
@@ -1008,18 +1184,18 @@ impl FreeBibleReader {
         let conn = conn_arc.lock().unwrap();
 
         let mut stmt = match conn.prepare(
-            "SELECT source_kind, source_id,
-                    COALESCE((SELECT name FROM people WHERE id = source_id AND dataset_id = ?1),
-                            (SELECT name FROM events WHERE id = source_id AND dataset_id = ?1),
-                            (SELECT name FROM places WHERE id = source_id AND dataset_id = ?1),
-                            (SELECT name FROM people_groups WHERE id = source_id AND dataset_id = ?1),
-                            source_id)
-            FROM entity_verse_refs
-            WHERE dataset_id = ?1 AND book = ?2 AND chapter = ?3
-            AND ?4 >= verse AND (?4 <= end_verse OR end_verse IS NULL)
-            ORDER BY CASE source_kind
-                WHEN 'person' THEN 1 WHEN 'event' THEN 2 WHEN 'place' THEN 3 WHEN 'group' THEN 4 ELSE 5 END, source_id",
-        ) { Ok(s) => s, Err(_) => return Vec::new() };
+                "SELECT source_kind, source_id,
+                        COALESCE((SELECT name FROM people WHERE id = source_id AND dataset_id = ?1),
+                                (SELECT name FROM events WHERE id = source_id AND dataset_id = ?1),
+                                (SELECT name FROM places WHERE id = source_id AND dataset_id = ?1),
+                                (SELECT name FROM people_groups WHERE id = source_id AND dataset_id = ?1),
+                                source_id)
+                FROM entity_verse_refs
+                WHERE dataset_id = ?1 AND book = ?2 AND chapter = ?3
+                AND ?4 >= verse AND (?4 <= end_verse OR end_verse IS NULL)
+                ORDER BY CASE source_kind
+                    WHEN 'person' THEN 1 WHEN 'event' THEN 2 WHEN 'place' THEN 3 WHEN 'group' THEN 4 ELSE 5 END, source_id",
+            ) { Ok(s) => s, Err(_) => return Vec::new() };
 
         match stmt.query_map(rusqlite::params![dataset_id, book, chapter, verse], |r| {
             Ok(EntityRef {
@@ -1045,12 +1221,12 @@ impl FreeBibleReader {
 
         let pattern = format!("%{}%", query);
         let mut stmt = match conn.prepare(
-            "SELECT id, name, NULL, NULL, NULL, 0 FROM people WHERE dataset_id = ?1 AND name LIKE ?2
-             UNION ALL SELECT id, name, NULL, NULL, start_date, 0 FROM events WHERE dataset_id = ?1 AND name LIKE ?2
-             UNION ALL SELECT id, name, NULL, NULL, NULL, 0 FROM places WHERE dataset_id = ?1 AND name LIKE ?2
-             UNION ALL SELECT id, name, NULL, NULL, NULL, 0 FROM people_groups WHERE dataset_id = ?1 AND name LIKE ?2
-             ORDER BY 2 LIMIT 200",
-        ) { Ok(s) => s, Err(_) => return Vec::new() };
+                "SELECT id, name, NULL, NULL, NULL, 0 FROM people WHERE dataset_id = ?1 AND name LIKE ?2
+                 UNION ALL SELECT id, name, NULL, NULL, start_date, 0 FROM events WHERE dataset_id = ?1 AND name LIKE ?2
+                 UNION ALL SELECT id, name, NULL, NULL, NULL, 0 FROM places WHERE dataset_id = ?1 AND name LIKE ?2
+                 UNION ALL SELECT id, name, NULL, NULL, NULL, 0 FROM people_groups WHERE dataset_id = ?1 AND name LIKE ?2
+                 ORDER BY 2 LIMIT 200",
+            ) { Ok(s) => s, Err(_) => return Vec::new() };
 
         match stmt.query_map(rusqlite::params![dataset_id, pattern], |r| {
             Ok(EntitySummary {
@@ -1067,7 +1243,7 @@ impl FreeBibleReader {
         }
     }
 
-    // ── Installed state (query for library screen) ───────────────
+    // ── Installed state ─────────────────────────────────────────
 
     pub fn is_entity_set_installed(&self, dataset_id: String, kind: String) -> bool {
         let conn_arc = match self.conn.read().unwrap().clone() {
@@ -1095,8 +1271,6 @@ impl FreeBibleReader {
         };
         let conn = conn_arc.lock().unwrap_or_else(|p| p.into_inner());
 
-        // Same catalog-check pattern as `is_installed`: a typo like
-        // "adam-clark" should fail loudly, not read as "not installed".
         let in_catalog = conn
             .query_row(
                 "SELECT 1 FROM commentaries WHERE id = ?1",
@@ -1150,13 +1324,10 @@ impl FreeBibleReader {
         };
         let conn = conn_arc.lock().unwrap_or_else(|p| p.into_inner());
 
-        // Book name + total-chapters lookup. If the book isn't in
-        // `commentary_books`, the commentary has nothing for it — return
-        // Ok(None), which the caller renders as "no commentary here".
         let book_row = conn
             .query_row(
                 "SELECT name, number_of_chapters FROM commentary_books
-             WHERE commentary_id = ?1 AND id = ?2",
+                     WHERE commentary_id = ?1 AND id = ?2",
                 rusqlite::params![commentary_id, book_id],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)?)),
             )
@@ -1172,47 +1343,45 @@ impl FreeBibleReader {
         };
 
         let mut stmt = conn
-        .prepare(
-            "SELECT verse_number, text FROM commentary_chapters
-             WHERE commentary_id = ?1 AND book_id = ?2 AND chapter = ?3
-             ORDER BY position",
-        )
-        .map_err(|e| FreeBibleError::Generic {
-            error_message: format!(
-                "read_commentary_chapter({commentary_id}, {book_id} {chapter}) prepare failed: {e}"
-            ),
-        })?;
+                .prepare(
+                    "SELECT verse_number, text FROM commentary_chapters
+                     WHERE commentary_id = ?1 AND book_id = ?2 AND chapter = ?3
+                     ORDER BY position",
+                )
+                .map_err(|e| FreeBibleError::Generic {
+                    error_message: format!(
+                        "read_commentary_chapter({commentary_id}, {book_id} {chapter}) prepare failed: {e}"
+                    ),
+                })?;
 
         let rows = stmt
-        .query_map(
-            rusqlite::params![commentary_id, book_id, chapter],
-            |r| {
-                Ok(CommentaryBlock {
-                    verse_number: r.get(0)?,
-                    text: r.get(1)?,
-                })
-            },
-        )
-        .map_err(|e| FreeBibleError::Generic {
-            error_message: format!(
-                "read_commentary_chapter({commentary_id}, {book_id} {chapter}) query failed: {e}"
-            ),
-        })?;
+                .query_map(
+                    rusqlite::params![commentary_id, book_id, chapter],
+                    |r| {
+                        Ok(CommentaryBlock {
+                            verse_number: r.get(0)?,
+                            text: r.get(1)?,
+                        })
+                    },
+                )
+                .map_err(|e| FreeBibleError::Generic {
+                    error_message: format!(
+                        "read_commentary_chapter({commentary_id}, {book_id} {chapter}) query failed: {e}"
+                    ),
+                })?;
 
         let blocks: Vec<CommentaryBlock> = rows
-        .filter_map(|r| match r {
-            Ok(v) => Some(v),
-            Err(e) => {
-                log::error!(
-                    "read_commentary_chapter({commentary_id}, {book_id} {chapter}) row failed: {e}"
-                );
-                None
-            }
-        })
-        .collect();
+                .filter_map(|r| match r {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        log::error!(
+                            "read_commentary_chapter({commentary_id}, {book_id} {chapter}) row failed: {e}"
+                        );
+                        None
+                    }
+                })
+                .collect();
 
-        // No rows for this chapter: the book exists but this chapter has
-        // no commentary. Same contract as a missing book — Ok(None).
         if blocks.is_empty() {
             return Ok(None);
         }
@@ -1246,8 +1415,6 @@ impl FreeBibleReader {
         };
         let conn = conn_arc.lock().unwrap_or_else(|p| p.into_inner());
 
-        // First: is the id even in the catalog? A typo like "BSBcl"
-        // would otherwise look identical to "not installed".
         let in_catalog = conn
             .query_row(
                 "SELECT 1 FROM translations WHERE id = ?1",
@@ -1268,9 +1435,6 @@ impl FreeBibleReader {
             });
         }
 
-        // Second: read the installed flag. The row is known to exist,
-        // so a QueryReturnedNoRows here would be a race with an uninstall
-        // that we can't meaningfully recover from.
         let installed: i32 = conn
             .query_row(
                 "SELECT installed FROM translations WHERE id = ?1",

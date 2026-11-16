@@ -1,12 +1,12 @@
 //! Install a translation, then exercise the search API end to end.
 //!
-//! Eight queries, one per code path:
+//! Seven queries, one per code path:
 //!   1. "shepherd"           → text search (FTS5), single token
-//!   2. "love God"           → text search (FTS5), multi-word AND
+//!   2. "love God"           → multi-word text search (AND)
 //!   3. "JHN 3:16"           → reference (single verse, id resolution)
 //!   4. "gen 1:1-5"          → reference (verse range, name resolution)
 //!   5. "H430"               → lexicon (0 hits until a lexicon is installed)
-//!   6. "God" filtered to Psalms → text search with book filter
+//!   6. "God" filtered to one section → text search with explicit book_ids
 //!   7. "love God" phrase    → phrase mode (adjacent only)
 //!   8. "LORD" regex         → regex mode (bypasses FTS5)
 //!
@@ -61,75 +61,95 @@ fn main() {
             .unwrap_or_else(|e| format!("is_installed error: {e:?}"))
     );
 
-    // ── 2. Run the queries ──────────────────────────────────────
+    // ── 2. Discover sections from the installed translation ─────
     //
-    // Each entry is (label, query, translation_id, filter).
-    // The label is only for the section header so it's clear which
-    // code path each query exercises.
-    let queries: &[(&str, &str, Option<&str>, SearchFilter)] = &[
-        // Text search (FTS5), single token.
+    // The engine does not know what a canon is. The UI discovers
+    // sections by reading `book.section` on the book list, and
+    // builds the book_ids list itself. This example does the same
+    // thing so the filter path it exercises matches the one the
+    // app will use.
+    let books = reader.get_books(TRANSLATION.into());
+    info!("\n{} books installed", books.len());
+    let mut sections: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for b in &books {
+        sections
+            .entry(b.section.clone())
+            .or_default()
+            .push(b.id.clone());
+    }
+    for (section, ids) in &sections {
+        info!("  section {section:?}: {} book(s)", ids.len());
+    }
+
+    // ── 3. Run the queries ──────────────────────────────────────
+    let ot_ids = sections.get("ot").cloned().unwrap_or_default();
+    let psa_only = vec!["PSA".to_string()];
+    let love_god_phrase = SearchFilter {
+        book_ids: vec![],
+        mode: SearchMode::Phrase,
+    };
+    let lord_regex = SearchFilter {
+        book_ids: vec![],
+        mode: SearchMode::Regex,
+    };
+
+    // (label, query, translation_id, filter)
+    let queries: Vec<(&str, &str, Option<&str>, SearchFilter)> = vec![
         (
             "text, single token",
             "shepherd",
             Some(TRANSLATION),
             SearchFilter::default(),
         ),
-        // Text search (FTS5), multi-word AND (the default mode).
         (
             "text, multi-word",
             "love God",
             Some(TRANSLATION),
             SearchFilter::default(),
         ),
-        // Reference, single verse, id resolution.
         (
             "reference, id",
             "JHN 3:16",
             Some(TRANSLATION),
             SearchFilter::default(),
         ),
-        // Reference, verse range, name resolution.
         (
             "reference, range",
             "gen 1:1-5",
             Some(TRANSLATION),
             SearchFilter::default(),
         ),
-        // Lexicon — 0 hits until a lexicon dataset is installed.
         ("lexicon", "H430", None, SearchFilter::default()),
-        // Text search restricted to Psalms.
         (
-            "text, filtered to PSA",
+            "text, restricted to Old Testament section",
             "God",
             Some(TRANSLATION),
             SearchFilter {
-                book_ids: vec!["PSA".into()],
+                book_ids: ot_ids,
                 ..SearchFilter::default()
             },
         ),
-        // Phrase mode: "love God" must be adjacent, not just both
-        // tokens present. Compare the hit count against the
-        // multi-word query above — phrase mode should return fewer.
+        (
+            "text, restricted to Psalms",
+            "God",
+            Some(TRANSLATION),
+            SearchFilter {
+                book_ids: psa_only,
+                ..SearchFilter::default()
+            },
+        ),
         (
             "text, phrase mode",
             "love God",
             Some(TRANSLATION),
-            SearchFilter {
-                mode: SearchMode::Phrase,
-                ..SearchFilter::default()
-            },
+            love_god_phrase,
         ),
-        // Regex mode: `\bLord\b` matches the whole word "Lord" and
-        // "LORD" (case-insensitive), but not "Lordship". Bypasses
-        // FTS5 entirely — scans verse text with the compiled regex.
         (
             "text, regex mode",
             r"(?i)\bLord\b",
             Some(TRANSLATION),
-            SearchFilter {
-                mode: SearchMode::Regex,
-                ..SearchFilter::default()
-            },
+            lord_regex,
         ),
     ];
 
@@ -200,7 +220,7 @@ fn main() {
         );
     }
 
-    // ── 3. Cleanup ──────────────────────────────────────────────
+    // ── 4. Cleanup ──────────────────────────────────────────────
     drop(engine);
     cleanup(&db_path);
     info!("\nDone.");

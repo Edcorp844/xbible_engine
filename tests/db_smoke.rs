@@ -13,12 +13,6 @@ use rusqlite::Connection;
 use xbible_engine::engines::freebible_engine::search::SearchFilter;
 
 // ── Temp file guard ─────────────────────────────────────────────
-//
-// Every test gets a unique path (name + pid + counter) so parallel
-// `cargo test` threads never collide, and a `Drop` guard so a failed
-// assertion still removes the main DB and its WAL/SHM siblings.
-// Without the guard, a panic leaks three files into /tmp per failing
-// run; on CI that fills the disk over months.
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -133,10 +127,12 @@ fn db_creates_tables_and_sets_version() {
         ("translations", "license_url"),
         ("translations", "license_notes"),
         ("translations", "raw_json"),
+        ("translations", "selected_canon"),
         ("commentaries", "license_notes"),
         ("commentaries", "raw_json"),
         ("datasets", "license_notes"),
         ("datasets", "raw_json"),
+        ("book_metadata", "section"),
     ] {
         assert!(
             column_exists(&conn, table, column),
@@ -343,7 +339,6 @@ fn fts_index_populates_on_insert_and_clears_on_delete() {
         "verses_fts should have 2 rows after persist_book"
     );
 
-    // Search for "beginning" with no filter.
     let result = xbible_engine::engines::freebible_engine::search::search(
         &conn,
         "beginning",
@@ -358,7 +353,6 @@ fn fts_index_populates_on_insert_and_clears_on_delete() {
     assert_eq!(result.hits[0].verse, 1);
     assert!(result.hits[0].text.contains("In the beginning"));
 
-    // Delete one verse; the trigger must remove it from the index.
     conn.execute(
         "DELETE FROM verses WHERE translation_id='TST' AND book_id='GEN' AND chapter=2",
         [],
@@ -456,7 +450,12 @@ fn search_filter_restricts_to_book() {
     let db = TempDb::new("filter_book");
     let conn = xbible_engine::db::open(db.path()).expect("open failed");
 
-    // Seed catalog + books.
+    // Seed catalog + books + metadata (including section). The
+    // search filter no longer knows about testaments, so book_ids
+    // are what actually constrain the query. Sections are recorded
+    // anyway because `get_books` reads them — and a future test may
+    // check that the section-to-book-ids mapping the UI uses is
+    // consistent with what install wrote.
     conn.execute(
         "INSERT INTO translations
             (id, name, english_name, short_name, language, text_direction,
@@ -472,8 +471,13 @@ fn search_filter_restricts_to_book() {
         [],
     )
     .unwrap();
+    conn.execute(
+        "INSERT INTO book_metadata (translation_id, book_id, book_order, section)
+         VALUES ('TST','GEN',1,'ot'), ('TST','PSA',19,'ot')",
+        [],
+    )
+    .unwrap();
 
-    // Two verses, one in each book, both containing "God".
     conn.execute(
         "INSERT INTO verses (translation_id, book_id, chapter, verse, text)
          VALUES ('TST','GEN',1,1,'In the beginning God created the heavens.'),
@@ -482,7 +486,7 @@ fn search_filter_restricts_to_book() {
     )
     .unwrap();
 
-    // ── No filter: both verses returned ────────────────────────
+    // No filter: both verses returned.
     let no_filter = xbible_engine::engines::freebible_engine::search::search(
         &conn,
         "God",
@@ -494,7 +498,7 @@ fn search_filter_restricts_to_book() {
     .unwrap();
     assert_eq!(no_filter.total_hits, 2);
 
-    // ── Filter to Psalms only: one verse returned ──────────────
+    // Filter to Psalms only: one verse returned.
     let psa_only = xbible_engine::engines::freebible_engine::search::search(
         &conn,
         "God",
@@ -510,35 +514,35 @@ fn search_filter_restricts_to_book() {
     assert_eq!(psa_only.total_hits, 1);
     assert_eq!(psa_only.hits[0].book_id, "PSA");
 
-    // ── Old Testament flag: both verses are in the OT ─────────
-    let ot = xbible_engine::engines::freebible_engine::search::search(
+    // Filter to an explicit two-book list: both verses.
+    let both = xbible_engine::engines::freebible_engine::search::search(
         &conn,
         "God",
         Some("TST"),
         10,
         SearchFilter {
-            old_testament_only: true,
+            book_ids: vec!["GEN".into(), "PSA".into()],
             ..SearchFilter::default()
         },
         |_| {},
     )
     .unwrap();
-    assert_eq!(ot.total_hits, 2);
+    assert_eq!(both.total_hits, 2);
 
-    // ── New Testament flag: neither verse is in the NT ────────
-    let nt = xbible_engine::engines::freebible_engine::search::search(
+    // Filter to a book with no matching verses: zero results.
+    let jhn_only = xbible_engine::engines::freebible_engine::search::search(
         &conn,
         "God",
         Some("TST"),
         10,
         SearchFilter {
-            new_testament_only: true,
+            book_ids: vec!["JHN".into()],
             ..SearchFilter::default()
         },
         |_| {},
     )
     .unwrap();
-    assert_eq!(nt.total_hits, 0);
+    assert_eq!(jhn_only.total_hits, 0);
 }
 
 // ── Search mode ────────────────────────────────────────────────
@@ -564,11 +568,6 @@ fn search_mode_phrase_requires_adjacent_words() {
     )
     .unwrap();
 
-    // Three verses, all containing "love" and "God" but in different
-    // orders and adjacencies:
-    //   1. "love God"       — adjacent, in order
-    //   2. "God is love"    — non-adjacent, reversed
-    //   3. "God's love"     — non-adjacent, apostrophe
     conn.execute(
         "INSERT INTO verses (translation_id, book_id, chapter, verse, text)
          VALUES ('TST','JHN',1,1,'love God'),
@@ -578,7 +577,6 @@ fn search_mode_phrase_requires_adjacent_words() {
     )
     .unwrap();
 
-    // Multi-word: all three verses contain both tokens.
     let multi = xbible_engine::engines::freebible_engine::search::search(
         &conn,
         "love God",
@@ -593,7 +591,6 @@ fn search_mode_phrase_requires_adjacent_words() {
     .unwrap();
     assert_eq!(multi.total_hits, 3, "multi-word should match all three");
 
-    // Phrase: only the adjacent, in-order occurrence matches.
     let phrase = xbible_engine::engines::freebible_engine::search::search(
         &conn,
         "love God",
@@ -631,7 +628,6 @@ fn search_mode_regex_matches_pattern() {
     )
     .unwrap();
 
-    // Two verses. Only the first ends with a word starting with "L".
     conn.execute(
         "INSERT INTO verses (translation_id, book_id, chapter, verse, text)
          VALUES ('TST','PSA',1,1,'The LORD is my shepherd'),
@@ -656,7 +652,6 @@ fn search_mode_regex_matches_pattern() {
     assert_eq!(result.hits[0].verse, 1);
     assert_eq!(result.hits[0].book_id, "PSA");
 
-    // Regex hit has no pre-computed highlights — the UI computes
-    // them from the same pattern if it wants to render them.
-    assert!(result.hits[0].highlights.is_empty());
+    // Regex hits carry span highlights now.
+    assert!(!result.hits[0].highlights.is_empty());
 }

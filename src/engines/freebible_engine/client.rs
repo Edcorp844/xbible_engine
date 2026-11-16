@@ -34,6 +34,15 @@ pub struct FreeBibleBook {
     pub book_order: Option<i32>,
     pub audio_links_json: Option<String>,
     pub raw_json: Option<String>,
+    /// Canonical section key: "ot" | "nt" | "deutero" |
+    /// "orthodox_extra" | "ethiopian_extra" | "unknown".
+    ///
+    /// Populated by `install::persist_book` from
+    /// `install::section_for_book_id`. A pre-v8 install has
+    /// `"unknown"` for every book until `rebuild_sections` runs.
+    /// The reader's `get_books` filters by this field via the
+    /// translation's `selected_canon`.
+    pub section: String,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -232,11 +241,6 @@ impl BibleClient {
         let http = {
             use rustls::RootCertStore;
 
-            // On Android, reqwest's default rustls backend goes through
-            // `rustls-platform-verifier`, which requires a JNI handshake with an
-            // Android Context. If that handshake hasn't happened, `.build()`
-            // errors and later calls fail. Bypass it with a pre-built rustls
-            // config using webpki roots instead.
             let mut roots = RootCertStore::empty();
             roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
             let config = rustls::ClientConfig::builder()
@@ -256,7 +260,7 @@ impl BibleClient {
                 Err(e) => {
                     log::warn!(
                         "BibleClient: android preconfigured client build failed ({}), \
-                     falling back to reqwest::blocking::Client::new()",
+                         falling back to reqwest::blocking::Client::new()",
                         e
                     );
                     Client::new()
@@ -277,7 +281,7 @@ impl BibleClient {
             Err(e) => {
                 log::warn!(
                     "BibleClient: client build failed ({}), \
-                 falling back to reqwest::blocking::Client::new()",
+                     falling back to reqwest::blocking::Client::new()",
                     e
                 );
                 Client::new()
@@ -333,6 +337,11 @@ impl BibleClient {
                     .as_ref()
                     .and_then(|v| serde_json::to_string(v).ok()),
                 raw_json: serde_json::to_string(&b.raw).ok(),
+                // The remote API does not carry canonical sections. The
+                // install path fills this in from the local lookup
+                // table, so the client-side record leaves it as
+                // "unknown" and never reads it back.
+                section: "unknown".into(),
             })
             .collect())
     }
@@ -535,6 +544,7 @@ impl BibleClient {
                 book_order: b.order,
                 audio_links_json: None,
                 raw_json: serde_json::to_string(&b.raw).ok(),
+                section: "unknown".into(),
             })
             .collect())
     }
@@ -606,6 +616,7 @@ impl BibleClient {
                 book_order: b.order,
                 audio_links_json: None,
                 raw_json: serde_json::to_string(&b.raw).ok(),
+                section: "unknown".into(),
             })
             .collect())
     }

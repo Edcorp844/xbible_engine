@@ -56,14 +56,121 @@ fn normalize_kind(api_type: &str) -> &str {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Canonical book section
+// ═══════════════════════════════════════════════════════════════
+
+/// Canonical section key for a book ID.
+///
+/// Returns one of:
+///
+/// - `"ot"` — Old Testament (39 books every tradition agrees on)
+/// - `"nt"` — New Testament (27 books every tradition agrees on)
+/// - `"deutero"` — Deuterocanonical / Apocrypha shared by Catholic
+///   and Orthodox canons
+/// - `"orthodox_extra"` — books only the Orthodox canons include
+/// - `"ethiopian_extra"` — books only the Ethiopian canon includes
+/// - `"unknown"` — a book ID not in any list; the UI shows it under
+///   an "Other" section until the table is updated
+///
+/// The function is a **data lookup**, not a canon declaration. It
+/// only records which section a book's text belongs to. Which of
+/// those sections a translation actually shows is controlled per
+/// translation by `translations.selected_canon`, and the UI maps
+/// the keys above to display names ("Old Testament",
+/// "Deuterocanonicals", etc.).
+///
+/// Adding a new book ID is one line in the right slice. Existing
+/// installs pick up the new section via
+/// `FreeBibleReader::rebuild_sections`, which re-reads `books` and
+/// rewrites `book_metadata.section` with this function's output.
+pub(crate) fn section_for_book_id(book_id: &str) -> &'static str {
+    // OT — 39 books.
+    const OT: &[&str] = &[
+        "GEN", "EXO", "LEV", "NUM", "DEU", "JOS", "JDG", "RUT", "1SA", "2SA", "1KI", "2KI", "1CH",
+        "2CH", "EZR", "NEH", "EST", "JOB", "PSA", "PRO", "ECC", "SNG", "ISA", "JER", "LAM", "EZK",
+        "DAN", "HOS", "JOL", "AMO", "OBA", "JON", "MIC", "NAM", "HAB", "ZEP", "HAG", "ZEC", "MAL",
+    ];
+
+    // NT — 27 books.
+    const NT: &[&str] = &[
+        "MAT", "MRK", "LUK", "JHN", "ACT", "ROM", "1CO", "2CO", "GAL", "EPH", "PHP", "COL", "1TH",
+        "2TH", "1TI", "2TI", "TIT", "PHM", "HEB", "JAS", "1PE", "2PE", "1JN", "2JN", "3JN", "JUD",
+        "REV",
+    ];
+
+    // Deuterocanonical — accepted by Catholic and Orthodox traditions.
+    const DEUTERO: &[&str] = &[
+        "TOB", // Tobit
+        "JDT", // Judith
+        "ESG", // Esther (Greek additions)
+        "WIS", // Wisdom of Solomon
+        "SIR", // Sirach / Ecclesiasticus
+        "BAR", // Baruch
+        "LJE", // Letter of Jeremiah
+        "S3Y", // Song of the Three Young Men
+        "SUS", // Susanna
+        "BEL", // Bel and the Dragon
+        "1MA", // 1 Maccabees
+        "2MA", // 2 Maccabees
+        "1ES", // 1 Esdras
+        "2ES", // 2 Esdras
+        "MAN", // Prayer of Manasseh
+        "PS2", // Psalm 151 (a.k.a. Psalm 151 in some USFM sets)
+    ];
+
+    // Orthodox-only additions, beyond the Catholic set.
+    const ORTHODOX_EXTRA: &[&str] = &[
+        "3MA", // 3 Maccabees
+        "4MA", // 4 Maccabees (appendix in some editions)
+        "DAG", // Daniel (Greek, full form) — sometimes a distinct ID
+        "ADE", // Additions to Daniel — sometimes a distinct ID
+    ];
+
+    // Ethiopian-only additions.
+    const ETHIOPIAN_EXTRA: &[&str] = &[
+        "ENO", // Enoch (1 Enoch)
+        "JUB", // Jubilees
+        "1MQ", // 1 Meqabyan
+        "2MQ", // 2 Meqabyan
+        "3MQ", // 3 Meqabyan
+        "4BA", // 4 Baruch
+        "JOS", // This collides with Joshua — see note below.
+    ];
+
+    // Note: the Ethiopian canon's "Book of Joseph ben Gurion" does not
+    // yet have a widely agreed USFM code. It will land in "unknown"
+    // until the Free Use Bible API assigns one. The `JOS` entry above
+    // is a placeholder warning that "JOS" is Joshua in every other
+    // translation — do not add it to ETHIOPIAN_EXTRA. The Ethiopian
+    // Josippon is not the same book and will need its own ID.
+
+    if OT.contains(&book_id) {
+        "ot"
+    } else if NT.contains(&book_id) {
+        "nt"
+    } else if DEUTERO.contains(&book_id) {
+        "deutero"
+    } else if ORTHODOX_EXTRA.contains(&book_id) {
+        "orthodox_extra"
+    } else if ETHIOPIAN_EXTRA.contains(&book_id) {
+        "ethiopian_extra"
+    } else {
+        "unknown"
+    }
+}
+
+// ── Verse merging ────────────────────────────────────────────
+
 /// Merge verses that share a verse number within one chapter.
 ///
-/// Some translations (especially non-standard versification) repeat a
-/// verse number, e.g. a page break splitting verse 12 into two rows.
-/// The `verses` table has a UNIQUE key on
+/// Some translations (especially non-standard versification) repeat
+/// a verse number, e.g. a page break splitting verse 12 into two
+/// rows. The `verses` table has a UNIQUE key on
 /// `(translation_id, book_id, chapter, verse)`, so duplicates would
-/// abort the install. Concatenating preserves all text; the structured
-/// `chapter_items` table keeps the unmerged representation.
+/// abort the install. Concatenating preserves all text; the
+/// structured `chapter_items` table keeps the unmerged
+/// representation.
 fn merge_verse_rows(verses: &[FreeBibleVerse]) -> BTreeMap<i32, String> {
     let mut merged: BTreeMap<i32, String> = BTreeMap::new();
     for v in verses {
@@ -108,7 +215,7 @@ pub(crate) fn wipe_translation(
     Ok(())
 }
 
-// ── Translation install helpers (called from store_api via writer) ──
+// ── Translation install helpers ──────────────────────────────
 
 pub(crate) fn begin_install(conn: &Connection, translation_id: &str) -> Result<(), FreeBibleError> {
     wipe_translation(conn, translation_id)?;
@@ -122,6 +229,15 @@ pub(crate) fn begin_install(conn: &Connection, translation_id: &str) -> Result<(
     Ok(())
 }
 
+/// Persist one book's `books`, `book_metadata`, and every chapter's
+/// verses, items, footnotes, audio timings, and raw JSON. One writer
+/// job (one transaction) per call.
+///
+/// The `book_metadata.section` column is populated here from
+/// [`section_for_book_id`]. A pre-v8 install has every book tagged
+/// `"unknown"`; `rebuild_sections` (in `reader.rs`) is what fixes
+/// those, and the reader's `needs_section_update` is what tells the
+/// UI to offer a rebuild.
 pub fn persist_book(
     conn: &Connection,
     translation_id: &str,
@@ -139,8 +255,8 @@ pub fn persist_book(
     conn.execute(
         "INSERT OR REPLACE INTO book_metadata (
             translation_id, book_id, common_name, title,
-            book_order, audio_links_json, raw_json
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            book_order, audio_links_json, raw_json, section
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
         params![
             translation_id,
             book.id,
@@ -149,6 +265,7 @@ pub fn persist_book(
             book.book_order,
             book.audio_links_json,
             book.raw_json,
+            section_for_book_id(&book.id),
         ],
     )
     .map_err(|e| FreeBibleError::Generic {
@@ -345,16 +462,82 @@ pub(crate) fn uninstall_translation(
     Ok(())
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Section rebuild (called by reader when a pre-v8 install needs
+// its sections filled in)
+// ═══════════════════════════════════════════════════════════════
+
+/// Rewrite `book_metadata.section` for every book of a translation
+/// using the current [`section_for_book_id`] lookup.
+///
+/// This is what a translation installed before v8 calls to fix its
+/// section data. It does not touch `books`, `verses`, or any other
+/// table — just the one column. After it runs, the reader's
+/// `needs_section_update` returns `false`.
+///
+/// Returns the number of books whose section changed, so the caller
+/// can log "rebuilt N book sections for translation X".
+pub(crate) fn rebuild_sections_for_translation(
+    conn: &Connection,
+    translation_id: &str,
+) -> Result<usize, FreeBibleError> {
+    let mut book_stmt = conn
+        .prepare(
+            "SELECT book_id FROM book_metadata
+             WHERE translation_id = ?1 AND section = 'unknown'",
+        )
+        .map_err(|e| FreeBibleError::Generic {
+            error_message: format!("prepare rebuild query: {e}"),
+        })?;
+
+    let unknown_books: Vec<String> = book_stmt
+        .query_map(params![translation_id], |r| r.get::<_, String>(0))
+        .map_err(|e| FreeBibleError::Generic {
+            error_message: format!("query rebuild: {e}"),
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if unknown_books.is_empty() {
+        return Ok(0);
+    }
+
+    let mut update_stmt = conn
+        .prepare(
+            "UPDATE book_metadata SET section = ?1
+             WHERE translation_id = ?2 AND book_id = ?3",
+        )
+        .map_err(|e| FreeBibleError::Generic {
+            error_message: format!("prepare section update: {e}"),
+        })?;
+
+    let mut changed = 0usize;
+    for book_id in &unknown_books {
+        let section = section_for_book_id(book_id);
+        if section == "unknown" {
+            // Still not in the lookup table — leave the row alone so
+            // the UI keeps showing it under "Other" and a future
+            // migration can add the book ID once it has a code.
+            continue;
+        }
+        update_stmt
+            .execute(params![section, translation_id, book_id])
+            .map_err(|e| FreeBibleError::Generic {
+                error_message: format!("update section for {book_id}: {e}"),
+            })?;
+        changed += 1;
+    }
+
+    info!(
+        "rebuilt sections for {}: {}/{} books updated",
+        translation_id,
+        changed,
+        unknown_books.len()
+    );
+    Ok(changed)
+}
+
 // ── Commentary install helpers ────────────────────────────────
-//
-// A commentary chapter is much heavier than a translation chapter:
-// Adam Clarke writes hundreds to thousands of words per verse, so
-// a single chapter can be tens of KB. `persist_commentary_book`
-// (whole-book transaction) took minutes on Genesis and froze the
-// UI; `persist_commentary_chapter` is the per-chapter replacement.
-// Network fetches are parallelized in `fetch_commentary_book_chapters`
-// so the wall-clock cost is (chapters / WORKERS) × latency, not
-// chapters × latency.
 
 pub(crate) fn begin_commentary_install(
     conn: &Connection,
@@ -507,8 +690,6 @@ pub(crate) fn fetch_commentary_book_chapters(
     for _ in 0..WORKERS {
         let queue = queue.clone();
         let tx = tx.clone();
-        // Cheap: shares the connection pool. Every book of the
-        // install reuses the same 8 TCP/TLS connections.
         let client = client.clone();
         let cancel = cancel.clone();
         let commentary_id = commentary_owned.clone();
@@ -557,7 +738,6 @@ pub(crate) fn fetch_commentary_book_chapters(
 
 // ── Entity install: network side ─────────────────────────────
 
-/// Number of entities in the dataset for this kind. One network call.
 pub(crate) fn count_entity_set(
     client: &BibleClient,
     dataset_id: &str,
