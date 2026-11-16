@@ -318,6 +318,43 @@ const MIGRATIONS: &[M<'_>] = &[
             ON commentary_chapters (commentary_id, book_id, chapter);
         "#,
     ),
+    // ── v7: FTS5 virtual table for search ──────────────────────────────
+    M::up(
+        r#"
+        -- FTS5 contentless index over verse text. `content=''` means
+        -- SQLite does not store a second copy of the text; the index is
+        -- a pointer structure into the rowid space of `verses`. The
+        -- application keeps the text in `verses`; FTS5 only stores the
+        -- inverted index.
+        CREATE VIRTUAL TABLE IF NOT EXISTS verses_fts USING fts5(
+            text,
+            content='',
+            tokenize='unicode61 remove_diacritics 2'
+        );
+
+        -- Populate from existing verses.
+        INSERT INTO verses_fts(rowid, text)
+            SELECT rowid, text FROM verses;
+
+        -- Keep the index in sync. These triggers run on every insert,
+        -- update, and delete of `verses`, so the install path and the
+        -- uninstall path do not need to know FTS exists.
+        CREATE TRIGGER IF NOT EXISTS verses_fts_ai AFTER INSERT ON verses BEGIN
+            INSERT INTO verses_fts(rowid, text) VALUES (new.rowid, new.text);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS verses_fts_ad AFTER DELETE ON verses BEGIN
+            INSERT INTO verses_fts(verses_fts, rowid, text)
+                VALUES ('delete', old.rowid, old.text);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS verses_fts_au AFTER UPDATE ON verses BEGIN
+            INSERT INTO verses_fts(verses_fts, rowid, text)
+                VALUES ('delete', old.rowid, old.text);
+            INSERT INTO verses_fts(rowid, text) VALUES (new.rowid, new.text);
+        END;
+        "#,
+    ),
 ];
 
 /// Apply every pending migration to `conn`, bringing it to

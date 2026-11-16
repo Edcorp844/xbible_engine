@@ -5,6 +5,7 @@ pub mod client;
 pub mod error;
 pub mod install;
 pub mod reader;
+pub mod search;
 pub mod store;
 pub mod store_api;
 pub mod utils;

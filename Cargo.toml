@@ -8,10 +8,6 @@ directories = "5.0"
 fnv = "1.0.7"
 isolang = "2.4.0"
 roxmltree = "0.21.1"
-uniffi = { version = "0.31.1", features = [
-    "cli",
-    "scaffolding-ffi-buffer-fns",
-] }
 regex = "1.12.3"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
@@ -32,6 +28,10 @@ webpki-roots = "1.0.11"
 rustls = "0.23.46"
 rusqlite = { version = "0.40.0", features = ["bundled"] }
 rusqlite_migration = "2.6.0"
+uniffi = { version = "0.32.2", features = [
+    "cli",
+    "scaffolding-ffi-buffer-fns",
+]}
 
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]

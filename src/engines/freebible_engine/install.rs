@@ -122,7 +122,7 @@ pub(crate) fn begin_install(conn: &Connection, translation_id: &str) -> Result<(
     Ok(())
 }
 
-pub(crate) fn persist_book(
+pub fn persist_book(
     conn: &Connection,
     translation_id: &str,
     book: &FreeBibleCompleteBook,
@@ -494,13 +494,10 @@ pub(crate) fn fetch_commentary_book_chapters(
     book: &FreeBibleBook,
     cancel: &Arc<AtomicBool>,
 ) -> Vec<FreeBibleCommentaryChapter> {
-    let chapter_numbers: Vec<u32> = (1..=book.number_of_chapters)
-        .map(|n| n as u32)
-        .collect();
+    let chapter_numbers: Vec<u32> = (1..=book.number_of_chapters).map(|n| n as u32).collect();
 
     let queue = Arc::new(Mutex::new(chapter_numbers));
-    let (tx, rx) =
-        mpsc::sync_channel::<FreeBibleCommentaryChapter>(CHANNEL_CAPACITY);
+    let (tx, rx) = mpsc::sync_channel::<FreeBibleCommentaryChapter>(CHANNEL_CAPACITY);
 
     let commentary_owned = commentary_id.to_string();
     let book_id = book.id.clone();
@@ -517,27 +514,29 @@ pub(crate) fn fetch_commentary_book_chapters(
         let commentary_id = commentary_owned.clone();
         let book_id = book_id.clone();
 
-        handles.push(thread::spawn(move || loop {
-            if cancel.load(Ordering::Relaxed) {
-                return;
-            }
-            let next = {
-                let mut q = queue.lock().unwrap_or_else(|p| p.into_inner());
-                q.pop()
-            };
-            let Some(ch_num) = next else { return };
-
-            match client.commentary_chapter(&commentary_id, &book_id, ch_num) {
-                Ok(ch) => {
-                    if tx.send(ch).is_err() {
-                        return;
-                    }
+        handles.push(thread::spawn(move || {
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
                 }
-                Err(e) => {
-                    warn!(
-                        "commentary {} {}:{} skipped: {}",
-                        commentary_id, book_id, ch_num, e
-                    );
+                let next = {
+                    let mut q = queue.lock().unwrap_or_else(|p| p.into_inner());
+                    q.pop()
+                };
+                let Some(ch_num) = next else { return };
+
+                match client.commentary_chapter(&commentary_id, &book_id, ch_num) {
+                    Ok(ch) => {
+                        if tx.send(ch).is_err() {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "commentary {} {}:{} skipped: {}",
+                            commentary_id, book_id, ch_num, e
+                        );
+                    }
                 }
             }
         }));

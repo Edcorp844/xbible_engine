@@ -323,6 +323,11 @@ fn parse_verse_words(raw_json: &str, fallback_text: String) -> Vec<ReaderVerse> 
     }]
 }
 
+#[uniffi::export(callback_interface)]
+pub trait SearchProgressListener: Send + Sync {
+    fn on_progress(&self, progress: super::search::SearchProgress);
+}
+
 // ── Reader UniFFI Object ─────────────────────────────────────────
 
 #[derive(Debug, uniffi::Object)]
@@ -346,6 +351,33 @@ impl FreeBibleReader {
         let mut lock = self.conn.write().unwrap();
         *lock = Some(Arc::new(Mutex::new(conn)));
         Ok(())
+    }
+
+    // ── Search ─────────────────────────────────────
+    pub fn search(
+        &self,
+        query: String,
+        translation_id: Option<String>,
+        limit: i32,
+        listener: Option<Box<dyn SearchProgressListener>>,
+    ) -> Result<super::search::SearchResults, FreeBibleError> {
+        let conn_arc = match self.conn.read().unwrap_or_else(|p| p.into_inner()).clone() {
+            Some(c) => c,
+            None => {
+                return Err(FreeBibleError::Generic {
+                    error_message: "reader has no connection — call setDbPath first".into(),
+                });
+            }
+        };
+        let conn = conn_arc.lock().unwrap_or_else(|p| p.into_inner());
+
+        let emit = |p: super::search::SearchProgress| {
+            if let Some(l) = listener.as_ref() {
+                l.on_progress(p);
+            }
+        };
+
+        super::search::search(&conn, &query, translation_id.as_deref(), limit, emit)
     }
 
     // ── Translations & Books ─────────────────────────────────────

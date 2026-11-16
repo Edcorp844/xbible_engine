@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
-use log::{error, info, warn};
 use rusqlite::Connection;
 
 use crate::db::writer::DbWriter;

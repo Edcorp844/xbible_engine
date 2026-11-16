@@ -1,10 +1,11 @@
 //! Integration tests for the shared SQLite layer.
 //!
-//! These live inside the crate (not in `tests/`) because `db::open`
-//! is `pub(crate)` — the raw opener is an internal escape hatch, and
-//! the public entry point is `Db::<Closed>::open`. Testing the real
-//! file-backed path, WAL, and migrations requires reaching the
-//! internal opener, so these are unit tests by Rust's definition.
+//! These live in `tests/` (a separate crate), so they reach the
+//! engine through `xbible_engine::` exactly as an external consumer
+//! would. That requires `db::open` and `install::persist_book` to be
+//! `pub` rather than `pub(crate)` — both are, so the tests exercise
+//! the same code path the engine uses without going through the
+//! network.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -121,6 +122,11 @@ fn db_creates_tables_and_sets_version() {
         "entity_refs",
         "entity_verse_refs",
         "entity_install_state",
+        // v6: commentary content
+        "commentary_books",
+        "commentary_chapters",
+        // v7: FTS5 verse index
+        "verses_fts",
     ] {
         assert!(table_exists(&conn, table), "missing table {table}");
     }
@@ -206,8 +212,17 @@ fn chapter_items_survive_insert_and_query() {
     conn.execute(
         insert,
         rusqlite::params![
-            "BSB", "GEN", 1, 0, "heading",
-            None::<i32>, "The Creation", 0, 0, None::<String>, "{}"
+            "BSB",
+            "GEN",
+            1,
+            0,
+            "heading",
+            None::<i32>,
+            "The Creation",
+            0,
+            0,
+            None::<String>,
+            "{}"
         ],
     )
     .unwrap();
@@ -215,8 +230,17 @@ fn chapter_items_survive_insert_and_query() {
     conn.execute(
         insert,
         rusqlite::params![
-            "BSB", "GEN", 1, 1, "verse",
-            Some(1), "In the beginning...", 0, 1, "fn1,fn2", "{}"
+            "BSB",
+            "GEN",
+            1,
+            1,
+            "verse",
+            Some(1),
+            "In the beginning...",
+            0,
+            1,
+            "fn1,fn2",
+            "{}"
         ],
     )
     .unwrap();
@@ -259,4 +283,182 @@ fn chapter_items_survive_insert_and_query() {
     assert_eq!(rows[1].1, Some(1));
     assert_eq!(rows[1].4, 1, "words_of_jesus should be 1");
     assert_eq!(rows[1].5.as_deref(), Some("fn1,fn2"));
+}
+
+// ── FTS5 index sync ────────────────────────────────────────────
+
+#[test]
+fn fts_index_populates_on_insert_and_clears_on_delete() {
+    let db = TempDb::new("fts_sync");
+    let conn = xbible_engine::db::open(db.path()).expect("open failed");
+
+    // Seed the catalog row so persist_book's UPDATE succeeds.
+    conn.execute(
+        "INSERT INTO translations
+            (id, name, english_name, short_name, language, text_direction,
+             number_of_books, total_number_of_chapters, total_number_of_verses,
+             installed, has_strongs)
+         VALUES ('TST','Test','Test','TST','eng','ltr',1,2,3,0,0)",
+        [],
+    )
+    .unwrap();
+
+    // Build a FreeBibleCompleteBook with two chapters. This is the
+    // exact type persist_book consumes, so the test exercises the
+    // real install write path, not a raw INSERT.
+    use xbible_engine::engines::freebible_engine::client::{
+        FreeBibleCompleteBook, FreeBibleCompleteChapter, FreeBibleVerse,
+    };
+
+    let book = FreeBibleCompleteBook {
+        id: "GEN".into(),
+        name: "Genesis".into(),
+        number_of_chapters: 2,
+        common_name: Some("Genesis".into()),
+        title: Some("Genesis".into()),
+        book_order: Some(1),
+        audio_links_json: None,
+        raw_json: "{}".into(),
+        chapters: vec![
+            FreeBibleCompleteChapter {
+                number: 1,
+                verses: vec![FreeBibleVerse {
+                    number: 1,
+                    text: "In the beginning God created the heavens and the earth.".into(),
+                }],
+                items: vec![],
+                footnotes: vec![],
+                audio_timings: vec![],
+                raw_json: "{}".into(),
+            },
+            FreeBibleCompleteChapter {
+                number: 2,
+                verses: vec![FreeBibleVerse {
+                    number: 1,
+                    text: "Thus the heavens and the earth were completed.".into(),
+                }],
+                items: vec![],
+                footnotes: vec![],
+                audio_timings: vec![],
+                raw_json: "{}".into(),
+            },
+        ],
+    };
+
+    xbible_engine::engines::freebible_engine::install::persist_book(&conn, "TST", &book)
+        .expect("persist_book");
+
+    // FTS index should now contain both verses. Query it directly
+    // so the assertion is not passing through search.rs yet.
+    let fts_count: i32 = conn
+        .query_row("SELECT COUNT(*) FROM verses_fts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        fts_count, 2,
+        "verses_fts should have 2 rows after persist_book"
+    );
+
+    // Now run a real search through the search module.
+    let result = xbible_engine::engines::freebible_engine::search::search(
+        &conn,
+        "beginning",
+        Some("TST"),
+        10,
+        |_| {},
+    )
+    .expect("search");
+    assert_eq!(result.total_hits, 1, "should find exactly one 'beginning'");
+    assert_eq!(result.hits[0].chapter, 1);
+    assert_eq!(result.hits[0].verse, 1);
+    assert!(result.hits[0].text.contains("In the beginning"));
+
+    // Delete one verse; the trigger must remove it from the index.
+    conn.execute(
+        "DELETE FROM verses WHERE translation_id='TST' AND book_id='GEN' AND chapter=2",
+        [],
+    )
+    .unwrap();
+
+    let fts_count_after: i32 = conn
+        .query_row("SELECT COUNT(*) FROM verses_fts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        fts_count_after, 1,
+        "verses_fts should have 1 row after deleting one verse"
+    );
+
+    // And the deleted verse's unique word ("completed") must be gone.
+    let result_after = xbible_engine::engines::freebible_engine::search::search(
+        &conn,
+        "completed",
+        Some("TST"),
+        10,
+        |_| {},
+    )
+    .expect("search after delete");
+    assert_eq!(
+        result_after.total_hits, 0,
+        "deleted verse should not be searchable"
+    );
+}
+
+#[test]
+fn fts_index_handles_update() {
+    let db = TempDb::new("fts_update");
+    let conn = xbible_engine::db::open(db.path()).expect("open failed");
+
+    conn.execute(
+        "INSERT INTO translations
+            (id, name, english_name, short_name, language, text_direction,
+             number_of_books, total_number_of_chapters, total_number_of_verses,
+             installed, has_strongs)
+         VALUES ('TST','Test','Test','TST','eng','ltr',1,1,1,0,0)",
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
+        "INSERT INTO books (translation_id, id, name, number_of_chapters)
+         VALUES ('TST','GEN','Genesis',1)",
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
+        "INSERT INTO verses (translation_id, book_id, chapter, verse, text)
+         VALUES ('TST','GEN',1,1,'original text')",
+        [],
+    )
+    .unwrap();
+
+    // UPDATE must remove the old token and add the new one.
+    // `verses_fts_au` does delete + reinsert.
+    conn.execute(
+        "UPDATE verses SET text='replacement text' WHERE translation_id='TST' AND book_id='GEN' AND chapter=1 AND verse=1",
+        [],
+    )
+    .unwrap();
+
+    let old = xbible_engine::engines::freebible_engine::search::search(
+        &conn,
+        "original",
+        Some("TST"),
+        10,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(old.total_hits, 0, "old token should be gone after update");
+
+    let new = xbible_engine::engines::freebible_engine::search::search(
+        &conn,
+        "replacement",
+        Some("TST"),
+        10,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        new.total_hits, 1,
+        "new token should be indexed after update"
+    );
 }
