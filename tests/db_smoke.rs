@@ -10,6 +10,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::Connection;
+use xbible_engine::engines::freebible_engine::search::SearchFilter;
 
 // ── Temp file guard ─────────────────────────────────────────────
 //
@@ -94,9 +95,6 @@ fn db_creates_tables_and_sets_version() {
     let v = user_version(&conn);
     assert!(v >= 1, "expected at least one migration, got {v}");
 
-    // Every table the migrations create must exist. This list must
-    // stay in sync with `migrations::MIGRATIONS`; if you add a
-    // migration, add its tables here in the same PR.
     for table in [
         // v1: catalog
         "translations",
@@ -131,8 +129,6 @@ fn db_creates_tables_and_sets_version() {
         assert!(table_exists(&conn, table), "missing table {table}");
     }
 
-    // Columns added by v4 via ALTER TABLE must be present. If a later
-    // migration adds columns, add them here.
     for (table, column) in [
         ("translations", "license_url"),
         ("translations", "license_notes"),
@@ -150,7 +146,6 @@ fn db_creates_tables_and_sets_version() {
 
     drop(conn);
 
-    // Reopening must not re-run migrations or change the version.
     let conn2 = xbible_engine::db::open(db.path()).expect("reopen failed");
     assert_eq!(
         user_version(&conn2),
@@ -177,10 +172,6 @@ fn wal_mode_is_enabled() {
 
 #[test]
 fn busy_timeout_and_foreign_keys_are_set() {
-    // These are the two pragmas whose absence produces real incidents
-    // on Android (SQLITE_BUSY during concurrent writes) and on every
-    // platform (silent FK violations). Assert them once, here, so a
-    // refactor of `open` cannot quietly drop them.
     let db = TempDb::new("pragmas");
     let conn = xbible_engine::db::open(db.path()).unwrap();
 
@@ -292,7 +283,6 @@ fn fts_index_populates_on_insert_and_clears_on_delete() {
     let db = TempDb::new("fts_sync");
     let conn = xbible_engine::db::open(db.path()).expect("open failed");
 
-    // Seed the catalog row so persist_book's UPDATE succeeds.
     conn.execute(
         "INSERT INTO translations
             (id, name, english_name, short_name, language, text_direction,
@@ -303,9 +293,6 @@ fn fts_index_populates_on_insert_and_clears_on_delete() {
     )
     .unwrap();
 
-    // Build a FreeBibleCompleteBook with two chapters. This is the
-    // exact type persist_book consumes, so the test exercises the
-    // real install write path, not a raw INSERT.
     use xbible_engine::engines::freebible_engine::client::{
         FreeBibleCompleteBook, FreeBibleCompleteChapter, FreeBibleVerse,
     };
@@ -348,8 +335,6 @@ fn fts_index_populates_on_insert_and_clears_on_delete() {
     xbible_engine::engines::freebible_engine::install::persist_book(&conn, "TST", &book)
         .expect("persist_book");
 
-    // FTS index should now contain both verses. Query it directly
-    // so the assertion is not passing through search.rs yet.
     let fts_count: i32 = conn
         .query_row("SELECT COUNT(*) FROM verses_fts", [], |r| r.get(0))
         .unwrap();
@@ -358,12 +343,13 @@ fn fts_index_populates_on_insert_and_clears_on_delete() {
         "verses_fts should have 2 rows after persist_book"
     );
 
-    // Now run a real search through the search module.
+    // Search for "beginning" with no filter.
     let result = xbible_engine::engines::freebible_engine::search::search(
         &conn,
         "beginning",
         Some("TST"),
         10,
+        SearchFilter::default(),
         |_| {},
     )
     .expect("search");
@@ -387,12 +373,12 @@ fn fts_index_populates_on_insert_and_clears_on_delete() {
         "verses_fts should have 1 row after deleting one verse"
     );
 
-    // And the deleted verse's unique word ("completed") must be gone.
     let result_after = xbible_engine::engines::freebible_engine::search::search(
         &conn,
         "completed",
         Some("TST"),
         10,
+        SearchFilter::default(),
         |_| {},
     )
     .expect("search after delete");
@@ -431,8 +417,6 @@ fn fts_index_handles_update() {
     )
     .unwrap();
 
-    // UPDATE must remove the old token and add the new one.
-    // `verses_fts_au` does delete + reinsert.
     conn.execute(
         "UPDATE verses SET text='replacement text' WHERE translation_id='TST' AND book_id='GEN' AND chapter=1 AND verse=1",
         [],
@@ -444,6 +428,7 @@ fn fts_index_handles_update() {
         "original",
         Some("TST"),
         10,
+        SearchFilter::default(),
         |_| {},
     )
     .unwrap();
@@ -454,6 +439,7 @@ fn fts_index_handles_update() {
         "replacement",
         Some("TST"),
         10,
+        SearchFilter::default(),
         |_| {},
     )
     .unwrap();
@@ -461,4 +447,99 @@ fn fts_index_handles_update() {
         new.total_hits, 1,
         "new token should be indexed after update"
     );
+}
+
+// ── Search filter ──────────────────────────────────────────────
+
+#[test]
+fn search_filter_restricts_to_book() {
+    let db = TempDb::new("filter_book");
+    let conn = xbible_engine::db::open(db.path()).expect("open failed");
+
+    // Seed catalog + books.
+    conn.execute(
+        "INSERT INTO translations
+            (id, name, english_name, short_name, language, text_direction,
+             number_of_books, total_number_of_chapters, total_number_of_verses,
+             installed, has_strongs)
+         VALUES ('TST','Test','Test','TST','eng','ltr',2,2,2,0,0)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO books (translation_id, id, name, number_of_chapters)
+         VALUES ('TST','GEN','Genesis',1), ('TST','PSA','Psalms',1)",
+        [],
+    )
+    .unwrap();
+
+    // Two verses, one in each book, both containing "God".
+    conn.execute(
+        "INSERT INTO verses (translation_id, book_id, chapter, verse, text)
+         VALUES ('TST','GEN',1,1,'In the beginning God created the heavens.'),
+                ('TST','PSA',1,1,'The LORD is my shepherd; God is with me.')",
+        [],
+    )
+    .unwrap();
+
+    // No filter: both verses returned.
+    let no_filter = xbible_engine::engines::freebible_engine::search::search(
+        &conn,
+        "God",
+        Some("TST"),
+        10,
+        SearchFilter::default(),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(no_filter.total_hits, 2);
+
+    // Filter to Psalms only: one verse returned.
+    let psa_only = xbible_engine::engines::freebible_engine::search::search(
+        &conn,
+        "God",
+        Some("TST"),
+        10,
+        SearchFilter {
+            book_ids: vec!["PSA".into()],
+            old_testament_only: false,
+            new_testament_only: false,
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(psa_only.total_hits, 1);
+    assert_eq!(psa_only.hits[0].book_id, "PSA");
+
+    // Old Testament flag: both verses are in the OT, so both returned.
+    let ot = xbible_engine::engines::freebible_engine::search::search(
+        &conn,
+        "God",
+        Some("TST"),
+        10,
+        SearchFilter {
+            book_ids: vec![],
+            old_testament_only: true,
+            new_testament_only: false,
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(ot.total_hits, 2);
+
+    // New Testament flag: neither verse is in the NT, so zero returned.
+    let nt = xbible_engine::engines::freebible_engine::search::search(
+        &conn,
+        "God",
+        Some("TST"),
+        10,
+        SearchFilter {
+            book_ids: vec![],
+            old_testament_only: false,
+            new_testament_only: true,
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(nt.total_hits, 0);
 }

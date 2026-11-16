@@ -359,6 +359,7 @@ impl FreeBibleReader {
         query: String,
         translation_id: Option<String>,
         limit: i32,
+        filter: super::search::SearchFilter,
         listener: Option<Box<dyn SearchProgressListener>>,
     ) -> Result<super::search::SearchResults, FreeBibleError> {
         let conn_arc = match self.conn.read().unwrap_or_else(|p| p.into_inner()).clone() {
@@ -377,7 +378,14 @@ impl FreeBibleReader {
             }
         };
 
-        super::search::search(&conn, &query, translation_id.as_deref(), limit, emit)
+        super::search::search(
+            &conn,
+            &query,
+            translation_id.as_deref(),
+            limit,
+            filter,
+            emit,
+        )
     }
 
     // ── Translations & Books ─────────────────────────────────────

@@ -1,11 +1,12 @@
 //! Install a translation, then exercise the search API end to end.
 //!
-//! Five queries, one per code path:
-//!   1. "shepherd"        → text search (FTS5), single token
-//!   2. "love God"        → multi-word text search (AND)
-//!   3. "JHN 3:16"        → reference (single verse, id resolution)
-//!   4. "gen 1:1-5"       → reference (verse range, name resolution)
-//!   5. "H430"            → lexicon (0 hits until a lexicon is installed)
+//! Six queries, one per code path:
+//!   1. "shepherd"           → text search (FTS5), single token
+//!   2. "love God"           → multi-word text search (AND)
+//!   3. "JHN 3:16"           → reference (single verse, id resolution)
+//!   4. "gen 1:1-5"          → reference (verse range, name resolution)
+//!   5. "H430"               → lexicon (0 hits until a lexicon is installed)
+//!   6. "God" filtered to Psalms → text search with book filter
 //!
 //! Progress events are printed as they arrive, so the phase
 //! transition Classifying → Resolving → Querying → Ranking → Done
@@ -21,7 +22,7 @@ use log::{error, info};
 use xbible_engine::XBibleEngine;
 use xbible_engine::engines::freebible_engine::reader::SearchProgressListener;
 use xbible_engine::engines::freebible_engine::search::{
-    SearchPhase, SearchProgress, SearchResults,
+    SearchFilter, SearchPhase, SearchProgress, SearchResults,
 };
 use xbible_engine::engines::freebible_engine::utils::FreeBibleTaskState;
 
@@ -59,21 +60,31 @@ fn main() {
     );
 
     // ── 2. Run the queries ──────────────────────────────────────
-    let queries: &[(&str, Option<&str>)] = &[
-        ("shepherd", Some(TRANSLATION)),
-        ("love God", Some(TRANSLATION)),
-        ("JHN 3:16", Some(TRANSLATION)),
-        ("gen 1:1-5", Some(TRANSLATION)),
-        ("H430", None),
+    //
+    // Each entry is (query, translation_id, filter).
+    let queries: &[(&str, Option<&str>, SearchFilter)] = &[
+        ("shepherd", Some(TRANSLATION), SearchFilter::default()),
+        ("love God", Some(TRANSLATION), SearchFilter::default()),
+        ("JHN 3:16", Some(TRANSLATION), SearchFilter::default()),
+        ("gen 1:1-5", Some(TRANSLATION), SearchFilter::default()),
+        ("H430", None, SearchFilter::default()),
+        // Sixth query: text search restricted to the Psalms.
+        (
+            "God",
+            Some(TRANSLATION),
+            SearchFilter {
+                book_ids: vec!["PSA".into()],
+                old_testament_only: false,
+                new_testament_only: false,
+            },
+        ),
     ];
 
-    for (query, tid) in queries {
+    for (query, tid, filter) in queries {
         info!("\n════════════════════════════════════════");
-        info!("Query: {query:?}   translation={tid:?}");
+        info!("Query: {query:?}   translation={tid:?}   filter={filter:?}");
         info!("────────────────────────────────────────");
 
-        // The listener owns a shared Vec. We keep a clone to read
-        // after the search returns; the listener keeps another.
         let phases = Arc::new(Mutex::new(Vec::<SearchPhase>::new()));
         let listener = PrintingListener {
             phases: phases.clone(),
@@ -83,6 +94,7 @@ fn main() {
             (*query).to_string(),
             tid.map(|s| s.to_string()),
             20,
+            filter.clone(),
             Some(Box::new(listener)),
         );
 
@@ -109,10 +121,6 @@ fn main() {
                     );
                     info!("       {preview}");
 
-                    // Print the first highlight as the slice it
-                    // covers, so a wrong byte offset is visible
-                    // immediately (it would print a shifted word
-                    // or a broken slice).
                     if let Some(h) = hit.highlights.first() {
                         let start = (h.start as usize).min(hit.text.len());
                         let end = (h.end as usize).min(hit.text.len());
@@ -145,11 +153,6 @@ fn main() {
 }
 
 // ── Progress listener ──────────────────────────────────────────
-//
-// `Box<dyn SearchProgressListener>` is `Box<dyn … + 'static>`, so
-// the listener cannot borrow anything on the stack. It owns an
-// `Arc<Mutex<Vec<SearchPhase>>>` instead; the caller keeps a clone
-// and reads it after `search` returns.
 
 struct PrintingListener {
     phases: Arc<Mutex<Vec<SearchPhase>>>,

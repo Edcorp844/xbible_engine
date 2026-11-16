@@ -12,6 +12,16 @@ pub struct HighlightSpan {
     pub end: u32,
 }
 
+#[derive(Debug, Clone, Default, uniffi::Record)]
+pub struct SearchFilter {
+    /// Only search within these book IDs (e.g. ["PSA", "PRO"]). Empty means all books.
+    pub book_ids: Vec<String>,
+    /// Search only the Old Testament (39 books)
+    pub old_testament_only: bool,
+    /// Search only the New Testament (27 books)
+    pub new_testament_only: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum SearchPhase {
     Classifying,
@@ -288,6 +298,7 @@ pub fn search(
     query: &str,
     translation_id: Option<&str>,
     limit: i32,
+    filter: SearchFilter,
     mut on_progress: impl FnMut(SearchProgress),
 ) -> Result<SearchResults, FreeBibleError> {
     let start = std::time::Instant::now();
@@ -328,7 +339,7 @@ pub fn search(
                 message: "Searching verses…".into(),
                 fraction: 0.4,
             });
-            search_text(conn, &text, translation_id, limit)?
+            search_text(conn, &text, translation_id, limit, &filter)?
         }
     };
 
@@ -380,6 +391,7 @@ fn search_text(
     text: &str,
     translation_id: Option<&str>,
     limit: i32,
+    filter: &SearchFilter,
 ) -> Result<(Vec<SearchHit>, i32), FreeBibleError> {
     if text.is_empty() {
         return Ok((Vec::new(), 0));
@@ -387,71 +399,142 @@ fn search_text(
 
     let fts_query = fts_sanitize(text);
 
-    // Join back to `verses` for the text (contentless FTS5 stores no
-    // text) and to `books` for the display name. The join on
-    // `rowid` is the FTS5 rowid == verses.rowid invariant created
-    // by the v7 triggers.
-    let sql = match translation_id {
-        Some(_) => {
-            "SELECT v.translation_id, v.book_id, b.name, v.chapter, v.verse, v.text, f.rank
-             FROM verses_fts f
-             JOIN verses v ON v.rowid = f.rowid
-             LEFT JOIN books b ON b.translation_id = v.translation_id AND b.id = v.book_id
-             WHERE f.verses_fts MATCH ?1 AND v.translation_id = ?2
-             ORDER BY f.rank
-             LIMIT ?3"
-        }
-        None => {
-            "SELECT v.translation_id, v.book_id, b.name, v.chapter, v.verse, v.text, f.rank
-             FROM verses_fts f
-             JOIN verses v ON v.rowid = f.rowid
-             LEFT JOIN books b ON b.translation_id = v.translation_id AND b.id = v.book_id
-             WHERE f.verses_fts MATCH ?1
-             ORDER BY f.rank
-             LIMIT ?2"
-        }
+    // Canonical book ID lists. Kept here so the frontend doesn't have
+    // to know which translations use which book IDs — every installed
+    // translation uses these same USFM-style IDs.
+    const OT_IDS: &[&str] = &[
+        "GEN", "EXO", "LEV", "NUM", "DEU", "JOS", "JDG", "RUT", "1SA", "2SA", "1KI", "2KI", "1CH",
+        "2CH", "EZR", "NEH", "EST", "JOB", "PSA", "PRO", "ECC", "SNG", "ISA", "JER", "LAM", "EZK",
+        "DAN", "HOS", "JOL", "AMO", "OBA", "JON", "MIC", "NAM", "HAB", "ZEP", "HAG", "ZEC", "MAL",
+    ];
+    const NT_IDS: &[&str] = &[
+        "MAT", "MRK", "LUK", "JHN", "ACT", "ROM", "1CO", "2CO", "GAL", "EPH", "PHP", "COL", "1TH",
+        "2TH", "1TI", "2TI", "TIT", "PHM", "HEB", "JAS", "1PE", "2PE", "1JN", "2JN", "3JN", "JUD",
+        "REV",
+    ];
+
+    // ── Build the dynamic WHERE clause ─────────────────────────────
+    //
+    // Bind order matters: ?1 is always the FTS query, then optional
+    // translation_id, then the book list, then limit.
+    let mut where_clauses = vec!["f.verses_fts MATCH ?1".to_string()];
+    let mut bind_idx = 2;
+
+    if translation_id.is_some() {
+        where_clauses.push(format!("v.translation_id = ?{bind_idx}"));
+        bind_idx += 1;
+    }
+
+    // Which book IDs to constrain to, if any. Explicit list wins over
+    // the testament flags (a caller who passes both is asking for the
+    // explicit list, and the testament flags become noise).
+    let book_filter: Option<&[&str]> = if !filter.book_ids.is_empty() {
+        // The caller passed an explicit list. We can't borrow from
+        // `filter.book_ids` here because its type is `Vec<String>` and
+        // we need `&[&str]`, so we take a different path below and
+        // inline the values as parameters rather than a const slice.
+        None
+    } else if filter.old_testament_only {
+        Some(OT_IDS)
+    } else if filter.new_testament_only {
+        Some(NT_IDS)
+    } else {
+        None
     };
 
-    let mut stmt = conn.prepare(sql).map_err(|e| FreeBibleError::Generic {
+    let explicit_books: Option<&[String]> = if !filter.book_ids.is_empty() {
+        Some(&filter.book_ids)
+    } else {
+        None
+    };
+
+    // Emit the IN clause and reserve the parameter slots it needs.
+    let num_book_params = if let Some(books) = explicit_books {
+        books.len()
+    } else if let Some(ids) = book_filter {
+        ids.len()
+    } else {
+        0
+    };
+
+    if num_book_params > 0 {
+        let placeholders = (0..num_book_params)
+            .map(|i| format!("?{}", bind_idx + i))
+            .collect::<Vec<_>>()
+            .join(",");
+        where_clauses.push(format!("v.book_id IN ({placeholders})"));
+        bind_idx += num_book_params;
+    }
+
+    let where_sql = where_clauses.join(" AND ");
+    let limit_param = bind_idx;
+
+    // ── Hits query ─────────────────────────────────────────────────
+    let sql = format!(
+        "SELECT v.translation_id, v.book_id, b.name, v.chapter, v.verse, v.text, f.rank
+         FROM verses_fts f
+         JOIN verses v ON v.rowid = f.rowid
+         LEFT JOIN books b ON b.translation_id = v.translation_id AND b.id = v.book_id
+         WHERE {where_sql}
+         ORDER BY f.rank
+         LIMIT ?{limit_param}"
+    );
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| FreeBibleError::Generic {
         error_message: format!("search_text prepare: {e}"),
     })?;
 
-    let hits: Vec<SearchHit> = match translation_id {
-        Some(tid) => stmt
-            .query_map(params![fts_query, tid, limit], |r| make_text_hit(r, text))
-            .map_err(|e| FreeBibleError::Generic {
-                error_message: format!("search_text query: {e}"),
-            })?
-            .filter_map(|r| r.ok())
-            .collect(),
-        None => stmt
-            .query_map(params![fts_query, limit], |r| make_text_hit(r, text))
-            .map_err(|e| FreeBibleError::Generic {
-                error_message: format!("search_text query: {e}"),
-            })?
-            .filter_map(|r| r.ok())
-            .collect(),
-    };
+    // ── Bind parameters dynamically ────────────────────────────────
+    //
+    // Order must match the ?1..?N placeholders in the SQL above:
+    //   1. fts_query
+    //   2. translation_id (if present)
+    //   3..N+2. book list
+    //   N+3. limit
+    let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(limit_param as usize);
+    param_values.push(Box::new(fts_query.clone()));
 
-    // Second pass for the exact count: FTS5 LIMIT truncates hits.
-    let total: i32 = match translation_id {
-        Some(tid) => conn
-            .query_row(
-                "SELECT COUNT(*) FROM verses_fts f JOIN verses v ON v.rowid = f.rowid
-                 WHERE f.verses_fts MATCH ?1 AND v.translation_id = ?2",
-                params![fts_query, tid],
-                |r| r.get(0),
-            )
-            .unwrap_or(0),
-        None => conn
-            .query_row(
-                "SELECT COUNT(*) FROM verses_fts f JOIN verses v ON v.rowid = f.rowid
-                 WHERE f.verses_fts MATCH ?1",
-                params![fts_query],
-                |r| r.get(0),
-            )
-            .unwrap_or(0),
-    };
+    if let Some(tid) = translation_id {
+        param_values.push(Box::new(tid.to_string()));
+    }
+
+    if let Some(books) = explicit_books {
+        for id in books {
+            param_values.push(Box::new(id.clone()));
+        }
+    } else if let Some(ids) = book_filter {
+        for id in ids {
+            param_values.push(Box::new((*id).to_string()));
+        }
+    }
+
+    param_values.push(Box::new(limit));
+
+    let params_refs: Vec<&dyn rusqlite::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
+
+    let hits: Vec<SearchHit> = stmt
+        .query_map(&params_refs[..], |r| make_text_hit(r, text))
+        .map_err(|e| FreeBibleError::Generic {
+            error_message: format!("search_text query: {e}"),
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // ── Count query ────────────────────────────────────────────────
+    //
+    // Same WHERE clause, no LIMIT. Reuse the same parameter slice
+    // except drop the trailing `limit` value.
+    let count_sql = format!(
+        "SELECT COUNT(*)
+         FROM verses_fts f
+         JOIN verses v ON v.rowid = f.rowid
+         WHERE {where_sql}"
+    );
+
+    let count_params = &params_refs[..params_refs.len() - 1];
+    let total: i32 = conn
+        .query_row(&count_sql, count_params, |r| r.get(0))
+        .unwrap_or(0);
 
     Ok((hits, total))
 }
