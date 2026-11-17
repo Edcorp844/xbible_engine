@@ -4,7 +4,9 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use uniffi;
 
-// ── UniFFI records ────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// UniFFI Records
+// ═══════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FreeBibleTranslation {
@@ -33,16 +35,17 @@ pub struct FreeBibleBook {
     pub title: Option<String>,
     pub book_order: Option<i32>,
     pub audio_links_json: Option<String>,
+    pub is_apocryphal: bool,
     pub raw_json: Option<String>,
-    /// Canonical section key: "ot" | "nt" | "deutero" |
-    /// "orthodox_extra" | "ethiopian_extra" | "unknown".
-    ///
-    /// Populated by `install::persist_book` from
-    /// `install::section_for_book_id`. A pre-v8 install has
-    /// `"unknown"` for every book until `rebuild_sections` runs.
-    /// The reader's `get_books` filters by this field via the
-    /// translation's `selected_canon`.
     pub section: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct BookSection {
+    /// The wire key, e.g. "ot", "nt", "deutero"
+    pub section: String,
+    /// The books belonging to this section, in canonical order
+    pub books: Vec<FreeBibleBook>,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -154,6 +157,7 @@ pub struct FreeBibleCompleteBook {
     pub book_order: Option<i32>,
     pub audio_links_json: Option<String>,
     pub raw_json: String,
+    pub is_apocryphal: bool,
     pub chapters: Vec<FreeBibleCompleteChapter>,
 }
 
@@ -171,63 +175,15 @@ pub struct FreeBibleCompleteChapter {
 pub struct EntitySummary {
     pub id: String,
     pub name: String,
-    /// people only — true if it's a proper name (e.g. "Aaron", not "the priest")
     pub is_proper_name: Option<bool>,
-    /// people only — "Male" | "Female"
     pub gender: Option<String>,
-    /// events only — the year the event started
     pub start_date: Option<String>,
     pub number_of_references: i32,
 }
 
-#[derive(Deserialize)]
-struct RawEntitySummary {
-    id: String,
-    name: String,
-    #[serde(rename = "isProperName", default)]
-    is_proper_name: Option<bool>,
-    #[serde(default)]
-    gender: Option<String>,
-    #[serde(rename = "startDate", default)]
-    start_date: Option<String>,
-    #[serde(rename = "numberOfReferences", default)]
-    number_of_references: i32,
-}
-
-impl From<RawEntitySummary> for EntitySummary {
-    fn from(r: RawEntitySummary) -> Self {
-        Self {
-            id: r.id,
-            name: r.name,
-            is_proper_name: r.is_proper_name,
-            gender: r.gender,
-            start_date: r.start_date,
-            number_of_references: r.number_of_references,
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct PeopleListResponse {
-    people: Vec<RawEntitySummary>,
-}
-
-#[derive(Deserialize)]
-struct EventsListResponse {
-    events: Vec<RawEntitySummary>,
-}
-
-#[derive(Deserialize)]
-struct PlacesListResponse {
-    places: Vec<RawEntitySummary>,
-}
-
-#[derive(Deserialize)]
-struct GroupsListResponse {
-    groups: Vec<RawEntitySummary>,
-}
-
-// ── Client ────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// Client Implementation
+// ═══════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone)]
 pub struct BibleClient {
@@ -336,11 +292,8 @@ impl BibleClient {
                     .audio_links
                     .as_ref()
                     .and_then(|v| serde_json::to_string(v).ok()),
+                is_apocryphal: b.is_apocryphal.unwrap_or(false), // <-- FIXED
                 raw_json: serde_json::to_string(&b.raw).ok(),
-                // The remote API does not carry canonical sections. The
-                // install path fills this in from the local lookup
-                // table, so the client-side record leaves it as
-                // "unknown" and never reads it back.
                 section: "unknown".into(),
             })
             .collect())
@@ -394,8 +347,20 @@ impl BibleClient {
         translation: &str,
         mut on_bytes: impl FnMut(u64, Option<u64>),
     ) -> Result<FreeBibleComplete, String> {
+        use std::collections::HashMap;
         use std::io::Read;
 
+        // 1. Fetch the authoritative book list. `books.json` is the only
+        //    endpoint that reliably carries `isApocryphal` on every book;
+        //    `complete.json` omits it for the standard translations and
+        //    silently drops it for some apocryphal ones too.
+        let books_list = self.books(translation)?;
+        let apocryphal_by_id: HashMap<String, bool> = books_list
+            .iter()
+            .map(|b| (b.id.clone(), b.is_apocryphal))
+            .collect();
+
+        // 2. Fetch and parse `complete.json` as before.
         let url = format!("{}/{}/complete.json", self.base_url, translation);
         let mut resp = self.http.get(&url).send().map_err(|e| e.to_string())?;
 
@@ -425,6 +390,15 @@ impl BibleClient {
             .into_iter()
             .map(|b| {
                 let raw_book_json = serde_json::to_string(&b.raw).unwrap_or_default();
+
+                // `books.json` wins; fall back to whatever `complete.json`
+                // carried (usually None), then `false`.
+                let is_apocryphal = apocryphal_by_id
+                    .get(&b.id)
+                    .copied()
+                    .or(b.is_apocryphal)
+                    .unwrap_or(false);
+
                 FreeBibleCompleteBook {
                     id: b.id,
                     name: b.name,
@@ -437,6 +411,7 @@ impl BibleClient {
                         .as_ref()
                         .and_then(|v| serde_json::to_string(v).ok()),
                     raw_json: raw_book_json,
+                    is_apocryphal,
                     chapters: b
                         .chapters
                         .into_iter()
@@ -543,6 +518,7 @@ impl BibleClient {
                 title: b.title,
                 book_order: b.order,
                 audio_links_json: None,
+                is_apocryphal: b.is_apocryphal.unwrap_or(false), // <-- FIXED
                 raw_json: serde_json::to_string(&b.raw).ok(),
                 section: "unknown".into(),
             })
@@ -615,6 +591,7 @@ impl BibleClient {
                 title: b.title,
                 book_order: b.order,
                 audio_links_json: None,
+                is_apocryphal: b.is_apocryphal.unwrap_or(false), // <-- FIXED
                 raw_json: serde_json::to_string(&b.raw).ok(),
                 section: "unknown".into(),
             })
@@ -697,7 +674,9 @@ impl BibleClient {
     }
 }
 
-// ── Flexible deserializers ────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// Flexible Deserializers
+// ═══════════════════════════════════════════════════════════════
 
 fn de_bool_flexible<'de, D>(d: D) -> Result<bool, D::Error>
 where
@@ -755,7 +734,9 @@ where
     })
 }
 
-// ── Text assembly helper ──────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// Text Parsing Helpers
+// ═══════════════════════════════════════════════════════════════
 
 fn append_piece(text: &mut String, piece: &str) {
     if piece.is_empty() {
@@ -770,8 +751,6 @@ fn append_piece(text: &mut String, piece: &str) {
     }
     text.push_str(piece);
 }
-
-// ── Parsers ───────────────────────────────────────────────────────
 
 pub(crate) fn parse_chapter_items(items: Vec<RawChapterItem>) -> Vec<FreeBibleChapterItem> {
     let mut out = Vec::with_capacity(items.len());
@@ -905,7 +884,9 @@ pub(crate) fn parse_verses(items: Vec<RawChapterItem>) -> Vec<FreeBibleVerse> {
         .collect()
 }
 
-// ── Serde structs ─────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// Serde Structs (for parsing API responses)
+// ═══════════════════════════════════════════════════════════════
 
 #[derive(Deserialize)]
 struct TranslationsResponse {
@@ -960,6 +941,8 @@ struct RawBook {
     order: Option<i32>,
     #[serde(rename = "thisBookAudioLinks")]
     audio_links: Option<serde_json::Value>,
+    #[serde(rename = "isApocryphal", default)]
+    is_apocryphal: Option<bool>,
     #[serde(flatten)]
     raw: serde_json::Value,
 }
@@ -1141,6 +1124,8 @@ struct RawCompleteBook {
     order: Option<i32>,
     #[serde(rename = "thisBookAudioLinks")]
     audio_links: Option<serde_json::Value>,
+    #[serde(rename = "isApocryphal", default)]
+    is_apocryphal: Option<bool>,
     chapters: Vec<RawCompleteChapterWrap>,
     #[serde(flatten)]
     raw: serde_json::Value,
@@ -1185,4 +1170,53 @@ struct RawAudioTiming {
     start_ms: Option<f64>,
     #[serde(rename = "end", default)]
     end_ms: Option<f64>,
+}
+
+// ── Entity List Response Structs ──────────────────────────────────
+
+#[derive(Deserialize)]
+struct PeopleListResponse {
+    people: Vec<RawEntitySummary>,
+}
+
+#[derive(Deserialize)]
+struct EventsListResponse {
+    events: Vec<RawEntitySummary>,
+}
+
+#[derive(Deserialize)]
+struct PlacesListResponse {
+    places: Vec<RawEntitySummary>,
+}
+
+#[derive(Deserialize)]
+struct GroupsListResponse {
+    groups: Vec<RawEntitySummary>,
+}
+
+#[derive(Deserialize)]
+struct RawEntitySummary {
+    id: String,
+    name: String,
+    #[serde(rename = "isProperName", default)]
+    is_proper_name: Option<bool>,
+    #[serde(default)]
+    gender: Option<String>,
+    #[serde(rename = "startDate", default)]
+    start_date: Option<String>,
+    #[serde(rename = "numberOfReferences", default)]
+    number_of_references: i32,
+}
+
+impl From<RawEntitySummary> for EntitySummary {
+    fn from(r: RawEntitySummary) -> Self {
+        Self {
+            id: r.id,
+            name: r.name,
+            is_proper_name: r.is_proper_name,
+            gender: r.gender,
+            start_date: r.start_date,
+            number_of_references: r.number_of_references,
+        }
+    }
 }

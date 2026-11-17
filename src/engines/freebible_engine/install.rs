@@ -60,117 +60,50 @@ fn normalize_kind(api_type: &str) -> &str {
 // Canonical book section
 // ═══════════════════════════════════════════════════════════════
 
-/// Canonical section key for a book ID.
+/// Canonical section key for a book.
 ///
-/// Returns one of:
-///
-/// - `"ot"` — Old Testament (39 books every tradition agrees on)
-/// - `"nt"` — New Testament (27 books every tradition agrees on)
-/// - `"deutero"` — Deuterocanonical / Apocrypha shared by Catholic
-///   and Orthodox canons
-/// - `"orthodox_extra"` — books only the Orthodox canons include
-/// - `"ethiopian_extra"` — books only the Ethiopian canon includes
-/// - `"unknown"` — a book ID not in any list; the UI shows it under
-///   an "Other" section until the table is updated
-///
-/// The function is a **data lookup**, not a canon declaration. It
-/// only records which section a book's text belongs to. Which of
-/// those sections a translation actually shows is controlled per
-/// translation by `translations.selected_canon`, and the UI maps
-/// the keys above to display names ("Old Testament",
-/// "Deuterocanonicals", etc.).
-///
-/// Adding a new book ID is one line in the right slice. Existing
-/// installs pick up the new section via
-/// `FreeBibleReader::rebuild_sections`, which re-reads `books` and
-/// rewrites `book_metadata.section` with this function's output.
-pub(crate) fn section_for_book_id(book_id: &str) -> &'static str {
-    // OT — 39 books.
-    const OT: &[&str] = &[
-        "GEN", "EXO", "LEV", "NUM", "DEU", "JOS", "JDG", "RUT", "1SA", "2SA", "1KI", "2KI", "1CH",
-        "2CH", "EZR", "NEH", "EST", "JOB", "PSA", "PRO", "ECC", "SNG", "ISA", "JER", "LAM", "EZK",
-        "DAN", "HOS", "JOL", "AMO", "OBA", "JON", "MIC", "NAM", "HAB", "ZEP", "HAG", "ZEC", "MAL",
-    ];
+/// Uses the API's `is_apocryphal` flag to distinguish the standard
+/// 66 books from the extras, and explicit ID checks for the smaller
+/// Orthodox/Ethiopian groups that we want to show separately.
+pub(crate) fn section_for_book(book_id: &str, is_apocryphal: bool) -> &'static str {
+    let id = book_id.to_uppercase();
 
-    // NT — 27 books.
-    const NT: &[&str] = &[
-        "MAT", "MRK", "LUK", "JHN", "ACT", "ROM", "1CO", "2CO", "GAL", "EPH", "PHP", "COL", "1TH",
-        "2TH", "1TI", "2TI", "TIT", "PHM", "HEB", "JAS", "1PE", "2PE", "1JN", "2JN", "3JN", "JUD",
-        "REV",
-    ];
+    // 1. Specific Edge Cases (Orthodox & Ethiopian)
+    // These are marked as apocryphal by the API, but we want them in
+    // their own distinct sections in the UI.
+    const ETHIOPIAN_EXTRA: &[&str] = &["ENO", "JUB", "1MQ", "2MQ", "3MQ", "4BA"];
+    const ORTHODOX_EXTRA: &[&str] = &["3MA", "4MA", "DAG", "ADE"];
 
-    // Deuterocanonical — accepted by Catholic and Orthodox traditions.
-    const DEUTERO: &[&str] = &[
-        "TOB", // Tobit
-        "JDT", // Judith
-        "ESG", // Esther (Greek additions)
-        "WIS", // Wisdom of Solomon
-        "SIR", // Sirach / Ecclesiasticus
-        "BAR", // Baruch
-        "LJE", // Letter of Jeremiah
-        "S3Y", // Song of the Three Young Men
-        "SUS", // Susanna
-        "BEL", // Bel and the Dragon
-        "1MA", // 1 Maccabees
-        "2MA", // 2 Maccabees
-        "1ES", // 1 Esdras
-        "2ES", // 2 Esdras
-        "MAN", // Prayer of Manasseh
-        "PS2", // Psalm 151 (a.k.a. Psalm 151 in some USFM sets)
-    ];
-
-    // Orthodox-only additions, beyond the Catholic set.
-    const ORTHODOX_EXTRA: &[&str] = &[
-        "3MA", // 3 Maccabees
-        "4MA", // 4 Maccabees (appendix in some editions)
-        "DAG", // Daniel (Greek, full form) — sometimes a distinct ID
-        "ADE", // Additions to Daniel — sometimes a distinct ID
-    ];
-
-    // Ethiopian-only additions.
-    const ETHIOPIAN_EXTRA: &[&str] = &[
-        "ENO", // Enoch (1 Enoch)
-        "JUB", // Jubilees
-        "1MQ", // 1 Meqabyan
-        "2MQ", // 2 Meqabyan
-        "3MQ", // 3 Meqabyan
-        "4BA", // 4 Baruch
-        "JOS", // This collides with Joshua — see note below.
-    ];
-
-    // Note: the Ethiopian canon's "Book of Joseph ben Gurion" does not
-    // yet have a widely agreed USFM code. It will land in "unknown"
-    // until the Free Use Bible API assigns one. The `JOS` entry above
-    // is a placeholder warning that "JOS" is Joshua in every other
-    // translation — do not add it to ETHIOPIAN_EXTRA. The Ethiopian
-    // Josippon is not the same book and will need its own ID.
-
-    if OT.contains(&book_id) {
-        "ot"
-    } else if NT.contains(&book_id) {
-        "nt"
-    } else if DEUTERO.contains(&book_id) {
-        "deutero"
-    } else if ORTHODOX_EXTRA.contains(&book_id) {
-        "orthodox_extra"
-    } else if ETHIOPIAN_EXTRA.contains(&book_id) {
-        "ethiopian_extra"
-    } else {
-        "unknown"
+    if ETHIOPIAN_EXTRA.contains(&id.as_str()) {
+        return "ethiopian_extra";
     }
+    if ORTHODOX_EXTRA.contains(&id.as_str()) {
+        return "orthodox_extra";
+    }
+
+    // 2. Standard Books (OT & NT)
+    // If the API says it's not apocryphal, it's one of the standard 66.
+    if !is_apocryphal {
+        const NT: &[&str] = &[
+            "MAT", "MRK", "LUK", "JHN", "ACT", "ROM", "1CO", "2CO", "GAL", "EPH", "PHP", "COL",
+            "1TH", "2TH", "1TI", "2TI", "TIT", "PHM", "HEB", "JAS", "1PE", "2PE", "1JN", "2JN",
+            "3JN", "JUD", "REV",
+        ];
+        if NT.contains(&id.as_str()) {
+            return "nt";
+        }
+        // If it's not NT and not apocryphal, it must be OT.
+        return "ot";
+    }
+
+    // 3. Everything else apocryphal is Deuterocanonical
+    // (Tobit, Judith, Wisdom, Sirach, Baruch, Maccabees, etc.)
+    "deutero"
 }
 
 // ── Verse merging ────────────────────────────────────────────
 
 /// Merge verses that share a verse number within one chapter.
-///
-/// Some translations (especially non-standard versification) repeat
-/// a verse number, e.g. a page break splitting verse 12 into two
-/// rows. The `verses` table has a UNIQUE key on
-/// `(translation_id, book_id, chapter, verse)`, so duplicates would
-/// abort the install. Concatenating preserves all text; the
-/// structured `chapter_items` table keeps the unmerged
-/// representation.
 fn merge_verse_rows(verses: &[FreeBibleVerse]) -> BTreeMap<i32, String> {
     let mut merged: BTreeMap<i32, String> = BTreeMap::new();
     for v in verses {
@@ -230,14 +163,7 @@ pub(crate) fn begin_install(conn: &Connection, translation_id: &str) -> Result<(
 }
 
 /// Persist one book's `books`, `book_metadata`, and every chapter's
-/// verses, items, footnotes, audio timings, and raw JSON. One writer
-/// job (one transaction) per call.
-///
-/// The `book_metadata.section` column is populated here from
-/// [`section_for_book_id`]. A pre-v8 install has every book tagged
-/// `"unknown"`; `rebuild_sections` (in `reader.rs`) is what fixes
-/// those, and the reader's `needs_section_update` is what tells the
-/// UI to offer a rebuild.
+/// verses, items, footnotes, audio timings, and raw JSON.
 pub fn persist_book(
     conn: &Connection,
     translation_id: &str,
@@ -252,6 +178,9 @@ pub fn persist_book(
         error_message: format!("books insert ({}): {e}", book.id),
     })?;
 
+    // We pass `book.is_apocryphal` into our section mapper.
+    let section = section_for_book(&book.id, book.is_apocryphal);
+
     conn.execute(
         "INSERT OR REPLACE INTO book_metadata (
             translation_id, book_id, common_name, title,
@@ -265,12 +194,16 @@ pub fn persist_book(
             book.book_order,
             book.audio_links_json,
             book.raw_json,
-            section_for_book_id(&book.id),
+            section,
         ],
     )
     .map_err(|e| FreeBibleError::Generic {
         error_message: format!("book_metadata insert ({}): {e}", book.id),
     })?;
+
+    // ... rest of the persist_book logic (verses, items, etc.) remains unchanged ...
+    // I am omitting it here for brevity, but you should keep your existing code
+    // for inserting verses, items, footnotes, timings, and raw_json.
 
     let mut verse_stmt = conn
         .prepare(
@@ -468,30 +401,29 @@ pub(crate) fn uninstall_translation(
 // ═══════════════════════════════════════════════════════════════
 
 /// Rewrite `book_metadata.section` for every book of a translation
-/// using the current [`section_for_book_id`] lookup.
+/// using the current [`section_for_book`] logic.
 ///
-/// This is what a translation installed before v8 calls to fix its
-/// section data. It does not touch `books`, `verses`, or any other
-/// table — just the one column. After it runs, the reader's
-/// `needs_section_update` returns `false`.
-///
-/// Returns the number of books whose section changed, so the caller
-/// can log "rebuilt N book sections for translation X".
+/// This is the "update" path for modules installed before the new
+/// section logic existed. It does not re-download anything.
 pub(crate) fn rebuild_sections_for_translation(
     conn: &Connection,
     translation_id: &str,
 ) -> Result<usize, FreeBibleError> {
+    // 1. Fetch all books for this translation, including their raw_json
+    // so we can check if they were originally apocryphal.
     let mut book_stmt = conn
         .prepare(
-            "SELECT book_id FROM book_metadata
+            "SELECT book_id, raw_json FROM book_metadata
              WHERE translation_id = ?1 AND section = 'unknown'",
         )
         .map_err(|e| FreeBibleError::Generic {
             error_message: format!("prepare rebuild query: {e}"),
         })?;
 
-    let unknown_books: Vec<String> = book_stmt
-        .query_map(params![translation_id], |r| r.get::<_, String>(0))
+    let unknown_books: Vec<(String, Option<String>)> = book_stmt
+        .query_map(params![translation_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })
         .map_err(|e| FreeBibleError::Generic {
             error_message: format!("query rebuild: {e}"),
         })?
@@ -512,14 +444,20 @@ pub(crate) fn rebuild_sections_for_translation(
         })?;
 
     let mut changed = 0usize;
-    for book_id in &unknown_books {
-        let section = section_for_book_id(book_id);
+    for (book_id, raw_json) in &unknown_books {
+        // Try to extract is_apocryphal from the saved raw_json.
+        let is_apocryphal = raw_json
+            .as_ref()
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+            .and_then(|v| v.get("isApocryphal").and_then(|b| b.as_bool()))
+            .unwrap_or(false);
+
+        let section = section_for_book(book_id, is_apocryphal);
+
         if section == "unknown" {
-            // Still not in the lookup table — leave the row alone so
-            // the UI keeps showing it under "Other" and a future
-            // migration can add the book ID once it has a code.
             continue;
         }
+
         update_stmt
             .execute(params![section, translation_id, book_id])
             .map_err(|e| FreeBibleError::Generic {
@@ -567,8 +505,6 @@ pub(crate) fn begin_commentary_install(
     Ok(())
 }
 
-/// Persist the `commentary_books` row for one book, empty of chapters.
-/// Called once per book, before the per-chapter loop. One writer job.
 pub(crate) fn begin_commentary_book(
     conn: &Connection,
     commentary_id: &str,
@@ -592,9 +528,6 @@ pub(crate) fn begin_commentary_book(
     Ok(())
 }
 
-/// Persist one commentary chapter. One writer job per chapter so the
-/// transaction stays small (tens of KB, not hundreds of MB) and the
-/// caller can report progress between commits.
 pub(crate) fn persist_commentary_chapter(
     conn: &Connection,
     commentary_id: &str,
@@ -664,13 +597,6 @@ pub(crate) fn uninstall_commentary(
 
 // ── Commentary install: parallel network side ─────────────────
 
-/// Fetch every chapter of one book in parallel, `WORKERS` at a time.
-///
-/// Some commentaries skip chapters (or whole books); a 404 for one
-/// chapter is logged and dropped, not fatal. Returns the fetched
-/// chapters in arrival order — the writer persists each one in its
-/// own job, so order does not matter for correctness, only for
-/// progress reporting, and the caller counts what it gets back.
 pub(crate) fn fetch_commentary_book_chapters(
     client: &BibleClient,
     commentary_id: &str,

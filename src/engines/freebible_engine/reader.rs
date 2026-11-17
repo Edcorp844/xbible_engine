@@ -1,7 +1,10 @@
 use rusqlite::{Connection, OptionalExtension};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::engines::freebible_engine::client::{EntitySummary, FreeBibleBook, FreeBibleFootnote};
+use crate::engines::freebible_engine::client::{
+    BookSection, EntitySummary, FreeBibleBook, FreeBibleFootnote,
+};
 use crate::engines::freebible_engine::error::FreeBibleError;
 
 // ── UniFFI Data Models ─────────────────────────────────────────
@@ -72,13 +75,9 @@ pub struct InstalledTranslation {
     pub book_count: i32,
     pub chapter_count: i32,
     pub verse_count: i32,
-    /// The canonical family this translation is currently showing.
-    /// One of: "protestant", "catholic", "orthodox", "ethiopian",
-    /// "all". See `set_selected_canon`.
-    pub selected_canon: String,
 }
 
-// Entity Models (Moved from store_api)
+// Entity Models
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct EntityRef {
     pub kind: String,
@@ -326,31 +325,13 @@ fn parse_verse_words(raw_json: &str, fallback_text: String) -> Vec<ReaderVerse> 
     }]
 }
 
-// ── Canonical section visibility ─────────────────────────────────
-
-/// Sections visible under a given canon key.
-///
-/// An unrecognized canon key returns `["ot", "nt"]`, which is the
-/// safe default (Protestant). If a future canon key gets added to
-/// the DB but not to this function, the translation silently falls
-/// back to Protestant rather than showing nothing — the user can
-/// still switch to "all" to see everything.
-fn sections_for_canon(canon: &str) -> &'static [&'static str] {
-    match canon {
-        "protestant" => &["ot", "nt"],
-        "catholic" => &["ot", "nt", "deutero"],
-        "orthodox" => &["ot", "nt", "deutero", "orthodox_extra"],
-        "ethiopian" => &["ot", "nt", "deutero", "orthodox_extra", "ethiopian_extra"],
-        "all" => &[
-            "ot",
-            "nt",
-            "deutero",
-            "orthodox_extra",
-            "ethiopian_extra",
-            "unknown",
-        ],
-        _ => &["ot", "nt"],
-    }
+/// Extract the `isApocryphal` flag from a book's stored `raw_json`.
+/// Used when reconstructing a `FreeBibleBook` from `book_metadata`.
+fn is_apocryphal_from_raw(raw_json: Option<&str>) -> bool {
+    raw_json
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|v| v.get("isApocryphal").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
 }
 
 #[uniffi::export(callback_interface)]
@@ -433,9 +414,9 @@ impl FreeBibleReader {
 
         let mut stmt = match conn.prepare(
             "SELECT id, name, english_name, short_name, language, language_name,
-                text_direction, number_of_books, total_number_of_chapters,
-                total_number_of_verses, selected_canon
-         FROM translations WHERE installed = 1 ORDER BY name",
+                    text_direction, number_of_books, total_number_of_chapters,
+                    total_number_of_verses
+                 FROM translations WHERE installed = 1 ORDER BY name",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -456,7 +437,6 @@ impl FreeBibleReader {
                 book_count: r.get(7)?,
                 chapter_count: r.get(8)?,
                 verse_count: r.get(9)?,
-                selected_canon: r.get(10)?,
             })
         });
 
@@ -477,44 +457,30 @@ impl FreeBibleReader {
         }
     }
 
-    /// Books visible under the translation's `selected_canon`, with
-    /// the canonical section attached.
-    pub fn get_books(&self, translation_id: String) -> Vec<FreeBibleBook> {
+    /// Books for the translation, grouped by section.
+    ///
+    /// Each returned `BookSection` carries the wire key (e.g. `"ot"`,
+    /// `"nt"`, `"deutero"`) and the books that belong to it, in
+    /// canonical order. Empty sections are dropped. The UI can render
+    /// section headings and book pickers directly from this shape.
+    pub fn get_books(&self, translation_id: String) -> Vec<BookSection> {
         let conn_arc = match self.conn.read().unwrap_or_else(|p| p.into_inner()).clone() {
             Some(c) => c,
             None => return Vec::new(),
         };
         let conn = conn_arc.lock().unwrap_or_else(|p| p.into_inner());
 
-        let canon: String = conn
-            .query_row(
-                "SELECT COALESCE(selected_canon, 'protestant')
-                 FROM translations WHERE id = ?1",
-                rusqlite::params![translation_id],
-                |r| r.get(0),
-            )
-            .unwrap_or_else(|_| "protestant".into());
+        let sql = "SELECT b.id, b.name, b.number_of_chapters,
+                          m.common_name, m.title, m.book_order,
+                          m.audio_links_json, m.raw_json,
+                          COALESCE(m.section, 'unknown')
+                   FROM books b
+                   LEFT JOIN book_metadata m
+                     ON m.translation_id = b.translation_id AND m.book_id = b.id
+                   WHERE b.translation_id = ?1
+                   ORDER BY COALESCE(m.book_order, 999999), b.id";
 
-        let visible = sections_for_canon(&canon);
-        let placeholders = (0..visible.len())
-            .map(|i| format!("?{}", i + 2))
-            .collect::<Vec<_>>()
-            .join(",");
-
-        let sql = format!(
-            "SELECT b.id, b.name, b.number_of_chapters,
-                    m.common_name, m.title, m.book_order,
-                    m.audio_links_json, m.raw_json,
-                    COALESCE(m.section, 'unknown')
-             FROM books b
-             LEFT JOIN book_metadata m
-               ON m.translation_id = b.translation_id AND m.book_id = b.id
-             WHERE b.translation_id = ?1
-               AND COALESCE(m.section, 'unknown') IN ({placeholders})
-             ORDER BY COALESCE(m.book_order, 999999), b.id"
-        );
-
-        let mut stmt = match conn.prepare(&sql) {
+        let mut stmt = match conn.prepare(sql) {
             Ok(s) => s,
             Err(e) => {
                 log::error!("get_books prepare failed: {e}");
@@ -522,15 +488,8 @@ impl FreeBibleReader {
             }
         };
 
-        let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(visible.len() + 1);
-        param_values.push(Box::new(translation_id));
-        for section in visible {
-            param_values.push(Box::new((*section).to_string()));
-        }
-        let params_refs: Vec<&dyn rusqlite::ToSql> =
-            param_values.iter().map(|b| b.as_ref()).collect();
-
-        let rows = stmt.query_map(&params_refs[..], |r| {
+        let rows = stmt.query_map(rusqlite::params![translation_id], |r| {
+            let raw_json: Option<String> = r.get(7)?;
             Ok(FreeBibleBook {
                 id: r.get(0)?,
                 name: r.get(1)?,
@@ -539,20 +498,64 @@ impl FreeBibleReader {
                 title: r.get(4)?,
                 book_order: r.get(5)?,
                 audio_links_json: r.get(6)?,
-                raw_json: r.get(7)?,
+                is_apocryphal: is_apocryphal_from_raw(raw_json.as_deref()),
+                raw_json,
                 section: r.get(8)?,
             })
         });
 
-        match rows {
+        let books: Vec<FreeBibleBook> = match rows {
             Ok(r) => r.filter_map(|x| x.ok()).collect(),
             Err(_) => Vec::new(),
+        };
+
+        let section_order = [
+            "ot",
+            "deutero",
+            "orthodox_extra",
+            "ethiopian_extra",
+            "unknown",
+            "nt",
+        ];
+
+        let mut grouped: BTreeMap<&'static str, Vec<FreeBibleBook>> = BTreeMap::new();
+        for book in books {
+            let key = match book.section.as_str() {
+                "ot" => "ot",
+                "nt" => "nt",
+                "deutero" => "deutero",
+                "orthodox_extra" => "orthodox_extra",
+                "ethiopian_extra" => "ethiopian_extra",
+                _ => "unknown",
+            };
+            grouped.entry(key).or_default().push(book);
         }
+
+        let mut result = Vec::new();
+        for key in section_order.iter() {
+            if let Some(books) = grouped.remove(*key) {
+                if !books.is_empty() {
+                    result.push(BookSection {
+                        section: (*key).to_string(),
+                        books,
+                    });
+                }
+            }
+        }
+        for (key, books) in grouped {
+            if !books.is_empty() {
+                result.push(BookSection {
+                    section: key.to_string(),
+                    books,
+                });
+            }
+        }
+
+        result
     }
 
     /// True if the translation was installed before v8, so its books
-    /// have no section data. The UI shows an "Update Required" banner
-    /// when this is true and offers `rebuild_sections`.
+    /// have no section data.
     pub fn needs_section_update(&self, translation_id: String) -> Result<bool, FreeBibleError> {
         let conn_arc = match self.conn.read().unwrap_or_else(|p| p.into_inner()).clone() {
             Some(c) => c,
@@ -579,8 +582,7 @@ impl FreeBibleReader {
     }
 
     /// Fill in `book_metadata.section` for every book of a translation
-    /// using the current `section_for_book_id` lookup. No-op for books
-    /// the lookup still does not know.
+    /// using the current section lookup.
     pub fn rebuild_sections(&self, translation_id: String) -> Result<i32, FreeBibleError> {
         let conn_arc = match self.conn.read().unwrap_or_else(|p| p.into_inner()).clone() {
             Some(c) => c,
@@ -594,16 +596,14 @@ impl FreeBibleReader {
 
         let changed = super::install::rebuild_sections_for_translation(&conn, &translation_id)?;
         log::info!(
-            "rebuild_sections: {}/{} book(s) updated for {}",
-            changed,
+            "rebuild_sections: {} book(s) updated for {}",
             changed,
             translation_id
         );
         Ok(changed as i32)
     }
 
-    /// Set which canonical family this translation shows. Does not
-    /// touch any book content — only `translations.selected_canon`.
+    /// Set which canonical family this translation shows.
     pub fn set_selected_canon(
         &self,
         translation_id: String,

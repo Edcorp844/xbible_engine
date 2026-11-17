@@ -398,6 +398,11 @@ const MIGRATIONS: &[M<'_>] = &[
             ADD COLUMN selected_canon TEXT NOT NULL DEFAULT 'protestant';
         "#,
     ),
+    M::up(
+        r#"
+        ALTER TABLE translations DROP COLUMN selected_canon;
+        "#,
+    ),
 ];
 
 /// Apply every pending migration to `conn`, bringing it to

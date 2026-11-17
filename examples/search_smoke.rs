@@ -16,6 +16,7 @@
 //! slice of `text` they cover, which is the fastest way to confirm
 //! they point at the right bytes.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -63,20 +64,20 @@ fn main() {
 
     // ── 2. Discover sections from the installed translation ─────
     //
-    // The engine does not know what a canon is. The UI discovers
-    // sections by reading `book.section` on the book list, and
-    // builds the book_ids list itself. This example does the same
-    // thing so the filter path it exercises matches the one the
-    // app will use.
-    let books = reader.get_books(TRANSLATION.into());
-    info!("\n{} books installed", books.len());
-    let mut sections: std::collections::BTreeMap<String, Vec<String>> =
-        std::collections::BTreeMap::new();
-    for b in &books {
-        sections
-            .entry(b.section.clone())
-            .or_default()
-            .push(b.id.clone());
+    // `get_books` returns grouped sections. Flatten to build the
+    // section → book_ids map the same way the UI would.
+    let sections_list = reader.get_books(TRANSLATION.into());
+    let total_books: usize = sections_list.iter().map(|s| s.books.len()).sum();
+    info!(
+        "\n{} book(s) across {} section(s) installed",
+        total_books,
+        sections_list.len()
+    );
+
+    let mut sections: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for section in &sections_list {
+        let ids: Vec<String> = section.books.iter().map(|b| b.id.clone()).collect();
+        sections.insert(section.section.clone(), ids);
     }
     for (section, ids) in &sections {
         info!("  section {section:?}: {} book(s)", ids.len());
