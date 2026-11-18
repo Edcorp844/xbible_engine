@@ -11,7 +11,7 @@ use rusqlite::{Connection, Statement, params};
 
 use crate::{
     error::XBibleError,
-    sources::{
+    sources::models::{
         CanonicalSection, GenericAudioTiming, GenericBook, GenericChapter, GenericChapterItem,
         GenericFootnote, GenericInstalledBible, GenericVerse,
     },

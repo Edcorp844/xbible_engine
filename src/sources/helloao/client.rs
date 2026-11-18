@@ -4,7 +4,7 @@
 //! (`books.json` `isApocryphal` fallback, `complete.json` streaming download,
 //! bounded concurrent chapter fetching over the shared Tokio runtime, dataset
 //! count fallbacks, and flexible deserializers) live here and map into the
-//! source-agnostic `Generic*` structs consumed by the Store and DB.
+//! source-agnostic `Generic*` structs consumed by the Store and DB[cite: 6].
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -19,11 +19,12 @@ use tokio::sync::Semaphore;
 use tokio::task::{JoinError, JoinSet};
 
 use crate::runtime::get_shared_runtime;
-use crate::sources::{
+use crate::sources::InstallProgressSink;
+use crate::sources::models::{
     CanonicalSection, GenericAudioSource, GenericAudioTiming, GenericBook, GenericBookChapters,
     GenericCatalogBible, GenericChapter, GenericChapterItem, GenericFootnote,
-    GenericInstalledBible, GenericTextSpan, GenericVerse, InstallProgressSink, LexicalInfo,
-    SpanFormatting, SpanKind, TextDirection,
+    GenericInstalledBible, GenericTextSpan, GenericVerse, LexicalInfo, SpanFormatting, SpanKind,
+    TextDirection,
 };
 
 pub const HELLOAO_SOURCE_ID: &str = "helloao";
@@ -221,6 +222,8 @@ impl HelloAOClient {
                 let section: CanonicalSection = infer_section(&b.id, is_apocryphal);
                 let audio_sources: Vec<GenericAudioSource> =
                     parse_audio_sources(b.audio_links.as_ref());
+                let audio_links_json: Option<String> = serialize_opt_json(b.audio_links.as_ref());
+                let raw_json: Option<String> = serialize_opt_json(Some(&b));
 
                 GenericBook {
                     translation_id: translation_id.to_string(),
@@ -233,6 +236,8 @@ impl HelloAOClient {
                     section,
                     number_of_chapters: b.number_of_chapters,
                     audio_sources,
+                    audio_links_json,
+                    raw_json,
                 }
             })
             .collect();
@@ -250,6 +255,7 @@ impl HelloAOClient {
             "{}/{}/{}.json",
             translation_id, book_id, chapter_number
         ))?;
+        let raw_json: String = serialize_json(&data.chapter);
 
         let (items, verses, footnotes): (
             Vec<GenericChapterItem>,
@@ -267,6 +273,7 @@ impl HelloAOClient {
             footnotes,
             audio_sources: Vec::new(),
             audio_timings: Vec::new(),
+            raw_json,
         })
     }
 
@@ -281,6 +288,7 @@ impl HelloAOClient {
             "{}/{}/{}.simple.json",
             translation_id, book_id, chapter_number
         ))?;
+        let chapter_raw_json: String = serialize_json(&data.chapter);
 
         let mut verses: Vec<GenericVerse> = Vec::new();
         let mut items: Vec<GenericChapterItem> = Vec::new();
@@ -291,6 +299,11 @@ impl HelloAOClient {
                 text,
             } = item
             {
+                let item_raw_json: Option<String> = serialize_opt_json(Some(&serde_json::json!({
+                    "type": "verse",
+                    "number": num,
+                    "text": text,
+                })));
                 verses.push(GenericVerse {
                     book_id: book_id.to_string(),
                     chapter: chapter_number,
@@ -314,7 +327,9 @@ impl HelloAOClient {
                         footnote_ids: Vec::new(),
                         cross_ref_ids: Vec::new(),
                         language_code: None,
+                        raw_json: item_raw_json.clone(),
                     }],
+                    raw_json: item_raw_json,
                 });
             }
         }
@@ -329,6 +344,7 @@ impl HelloAOClient {
             footnotes: Vec::new(),
             audio_sources: Vec::new(),
             audio_timings: Vec::new(),
+            raw_json: chapter_raw_json,
         })
     }
 
@@ -619,6 +635,9 @@ impl HelloAOClient {
             .into_iter()
             .map(|b: RawBook| -> GenericBook {
                 let is_apocryphal: bool = b.is_apocryphal.unwrap_or(false);
+                let audio_links_json: Option<String> = serialize_opt_json(b.audio_links.as_ref());
+                let raw_json: Option<String> = serialize_opt_json(Some(&b));
+
                 GenericBook {
                     translation_id: commentary_id.to_string(),
                     source_id: HELLOAO_SOURCE_ID.to_string(),
@@ -630,6 +649,8 @@ impl HelloAOClient {
                     section: infer_section(&b.id, is_apocryphal),
                     number_of_chapters: b.number_of_chapters,
                     audio_sources: Vec::new(),
+                    audio_links_json,
+                    raw_json,
                 }
             })
             .collect();
@@ -647,6 +668,7 @@ impl HelloAOClient {
             commentary_id, book_id, chapter_number
         ))?;
         let ch_num: i32 = chapter_number as i32;
+        let raw_json: String = serialize_json(&data.chapter);
         let (items, verses, footnotes): (
             Vec<GenericChapterItem>,
             Vec<GenericVerse>,
@@ -663,6 +685,7 @@ impl HelloAOClient {
             footnotes,
             audio_sources: Vec::new(),
             audio_timings: Vec::new(),
+            raw_json,
         })
     }
 
@@ -824,6 +847,14 @@ impl HelloAOClient {
 // Normalization Helpers (Raw HelloAO -> Generic*)
 // ═════════════════════════════════════════════════════════════════════════════
 
+fn serialize_json<T: Serialize>(val: &T) -> String {
+    serde_json::to_string(val).unwrap_or_default()
+}
+
+fn serialize_opt_json<T: Serialize>(val: Option<&T>) -> Option<String> {
+    val.and_then(|v| serde_json::to_string(v).ok())
+}
+
 fn normalize_complete_books(
     translation_id: &str,
     catalog: GenericCatalogBible,
@@ -841,6 +872,8 @@ fn normalize_complete_books(
             .unwrap_or(false);
         let section: CanonicalSection = infer_section(&b.id, is_apocryphal);
         let book_audio: Vec<GenericAudioSource> = parse_audio_sources(b.audio_links.as_ref());
+        let audio_links_json: Option<String> = serialize_opt_json(b.audio_links.as_ref());
+        let book_raw_json: Option<String> = serialize_opt_json(Some(&b));
 
         books.push(GenericBook {
             translation_id: translation_id.to_string(),
@@ -853,20 +886,25 @@ fn normalize_complete_books(
             section,
             number_of_chapters: b.number_of_chapters,
             audio_sources: book_audio.clone(),
+            audio_links_json,
+            raw_json: book_raw_json,
         });
 
         let mut book_chapters: Vec<GenericChapter> = Vec::with_capacity(b.chapters.len());
         for wrap in b.chapters {
             let c: RawChapterPayload = wrap.chapter;
+            let chapter_raw_json: String = serialize_json(&c);
             let footnotes: Vec<GenericFootnote> = c
                 .footnotes
                 .into_iter()
                 .map(|f: RawFootnote| -> GenericFootnote {
+                    let note_raw_json: Option<String> = serialize_opt_json(Some(&f));
                     GenericFootnote {
                         note_id: f.note_id,
                         caller: f.caller,
                         text: Some(f.text),
                         reference: f.reference,
+                        raw_json: note_raw_json,
                     }
                 })
                 .collect();
@@ -899,6 +937,7 @@ fn normalize_complete_books(
                 footnotes: chapter_footnotes,
                 audio_sources: book_audio.clone(),
                 audio_timings,
+                raw_json: chapter_raw_json,
             });
         }
 
@@ -1018,6 +1057,7 @@ fn pieces_to_spans_and_text(
     let mut pos: i32 = 0;
 
     for piece in pieces {
+        let piece_raw_json: Option<String> = serialize_opt_json(Some(piece));
         match piece {
             RawVersePiece::Text(t) => {
                 if !t.is_empty() {
@@ -1031,6 +1071,7 @@ fn pieces_to_spans_and_text(
                         footnote_ids: Vec::new(),
                         cross_ref_ids: Vec::new(),
                         language_code: None,
+                        raw_json: piece_raw_json,
                     });
                     pos += 1;
                 }
@@ -1065,6 +1106,7 @@ fn pieces_to_spans_and_text(
                         footnote_ids: Vec::new(),
                         cross_ref_ids: Vec::new(),
                         language_code: None,
+                        raw_json: piece_raw_json,
                     });
                     pos += 1;
                 }
@@ -1081,6 +1123,7 @@ fn pieces_to_spans_and_text(
                         footnote_ids: vec![id.clone()],
                         cross_ref_ids: Vec::new(),
                         language_code: None,
+                        raw_json: piece_raw_json,
                     });
                     pos += 1;
                 }
@@ -1107,6 +1150,7 @@ fn build_chapter_content(
 
     for (idx, raw) in raw_items.into_iter().enumerate() {
         let position: i32 = idx as i32;
+        let item_raw_json: Option<String> = serialize_opt_json(Some(&raw));
         match raw {
             RawChapterItem::Verse { number, content } => {
                 let (spans, text, is_poem, is_words_of_jesus, footnote_ids): (
@@ -1131,6 +1175,7 @@ fn build_chapter_content(
                     is_words_of_jesus,
                     footnote_ids,
                     spans,
+                    raw_json: item_raw_json,
                 });
             }
             RawChapterItem::Heading { content } => {
@@ -1150,6 +1195,7 @@ fn build_chapter_content(
                     is_words_of_jesus,
                     footnote_ids,
                     spans,
+                    raw_json: item_raw_json,
                 });
             }
             RawChapterItem::HebrewSubtitle { content } => {
@@ -1169,6 +1215,7 @@ fn build_chapter_content(
                     is_words_of_jesus,
                     footnote_ids,
                     spans,
+                    raw_json: item_raw_json,
                 });
             }
             RawChapterItem::LineBreak => {
@@ -1181,6 +1228,7 @@ fn build_chapter_content(
                     is_words_of_jesus: false,
                     footnote_ids: Vec::new(),
                     spans: Vec::new(),
+                    raw_json: item_raw_json,
                 });
             }
             RawChapterItem::Unknown => {
@@ -1193,6 +1241,7 @@ fn build_chapter_content(
                     is_words_of_jesus: false,
                     footnote_ids: Vec::new(),
                     spans: Vec::new(),
+                    raw_json: item_raw_json,
                 });
             }
         }
@@ -1284,7 +1333,7 @@ struct BooksResponse {
     books: Vec<RawBook>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct RawBook {
     id: String,
     name: String,
@@ -1311,12 +1360,12 @@ struct SimpleChapterResponse {
     chapter: RawSimpleChapterPayload,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct RawSimpleChapterPayload {
     content: Vec<FlexibleSimpleItem>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(untagged)]
 enum FlexibleSimpleItem {
     Verse {
@@ -1325,7 +1374,7 @@ enum FlexibleSimpleItem {
         #[serde(default, deserialize_with = "de_string_from_any")]
         text: String,
     },
-    Other(IgnoredAny),
+    Other(#[serde(skip_serializing)] IgnoredAny),
 }
 
 #[derive(Deserialize)]
@@ -1333,7 +1382,7 @@ struct CompleteResponse {
     books: Vec<RawCompleteBook>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct RawCompleteBook {
     id: String,
     name: String,
@@ -1352,12 +1401,12 @@ struct RawCompleteBook {
     chapters: Vec<RawCompleteChapterWrapper>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct RawCompleteChapterWrapper {
     chapter: RawChapterPayload,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct RawChapterPayload {
     #[serde(default)]
     number: i32,
@@ -1369,7 +1418,7 @@ struct RawChapterPayload {
     audio_timings: Vec<RawAudioTiming>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct RawFootnote {
     #[serde(rename = "noteId", default, deserialize_with = "de_string_from_any")]
     note_id: String,
@@ -1381,7 +1430,7 @@ struct RawFootnote {
     reference: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct RawAudioTiming {
     #[serde(default, deserialize_with = "de_opt_i32")]
     verse: Option<i32>,

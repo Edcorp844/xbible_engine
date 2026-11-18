@@ -1,4 +1,3 @@
-//pub mod bible;
-pub mod entities;
+pub mod reader;
 pub mod store;
 pub mod timeline;

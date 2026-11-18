@@ -57,7 +57,7 @@
 
 use rusqlite::{Connection, params};
 
-use crate::engines::freebible_engine::error::FreeBibleError;
+use crate::error::XBibleError;
 
 // ═══════════════════════════════════════════════════════════════
 // Result types — the shape of everything that crosses the FFI
@@ -336,7 +336,7 @@ pub fn search(
     limit: i32,
     filter: SearchFilter,
     mut on_progress: impl FnMut(SearchProgress),
-) -> Result<SearchResults, FreeBibleError> {
+) -> Result<SearchResults, XBibleError> {
     let start = std::time::Instant::now();
 
     on_progress(SearchProgress {
@@ -364,7 +364,7 @@ pub fn search(
             verse,
             end_verse,
         } => {
-            let tid = translation_id.ok_or_else(|| FreeBibleError::Generic {
+            let tid = translation_id.ok_or_else(|| XBibleError::Generic {
                 error_message: "reference search requires a translation".into(),
             })?;
             search_reference(conn, tid, &book, chapter, verse, end_verse, limit)?
@@ -411,7 +411,7 @@ fn search_text(
     translation_id: Option<&str>,
     limit: i32,
     filter: &SearchFilter,
-) -> Result<(Vec<SearchHit>, i32), FreeBibleError> {
+) -> Result<(Vec<SearchHit>, i32), XBibleError> {
     if text.is_empty() {
         return Ok((Vec::new(), 0));
     }
@@ -457,7 +457,7 @@ fn search_text_fts(
     translation_id: Option<&str>,
     limit: i32,
     filter: &SearchFilter,
-) -> Result<(Vec<SearchHit>, i32), FreeBibleError> {
+) -> Result<(Vec<SearchHit>, i32), XBibleError> {
     let fts_query = build_fts_query(text, filter.mode)?;
 
     // Bind order: ?1 = FTS query, optional translation_id, then the
@@ -494,7 +494,7 @@ fn search_text_fts(
          LIMIT ?{limit_param}"
     );
 
-    let mut stmt = conn.prepare(&sql).map_err(|e| FreeBibleError::Generic {
+    let mut stmt = conn.prepare(&sql).map_err(|e| XBibleError::Generic {
         error_message: format!("search_text prepare: {e}"),
     })?;
 
@@ -516,7 +516,7 @@ fn search_text_fts(
 
     let hits: Vec<SearchHit> = stmt
         .query_map(&params_refs[..], |r| make_text_hit(r, text))
-        .map_err(|e| FreeBibleError::Generic {
+        .map_err(|e| XBibleError::Generic {
             error_message: format!("search_text query: {e}"),
         })?
         .filter_map(|r| r.ok())
@@ -548,10 +548,10 @@ fn search_text_regex(
     translation_id: Option<&str>,
     limit: i32,
     filter: &SearchFilter,
-) -> Result<(Vec<SearchHit>, i32), FreeBibleError> {
+) -> Result<(Vec<SearchHit>, i32), XBibleError> {
     use regex::Regex;
 
-    let re = Regex::new(pattern).map_err(|e| FreeBibleError::Generic {
+    let re = Regex::new(pattern).map_err(|e| XBibleError::Generic {
         error_message: format!("invalid regex {pattern:?}: {e}"),
     })?;
 
@@ -581,7 +581,7 @@ fn search_text_regex(
          WHERE {where_sql}"
     );
 
-    let mut stmt = conn.prepare(&sql).map_err(|e| FreeBibleError::Generic {
+    let mut stmt = conn.prepare(&sql).map_err(|e| XBibleError::Generic {
         error_message: format!("search_text_regex prepare: {e}"),
     })?;
 
@@ -609,7 +609,7 @@ fn search_text_regex(
                 r.get::<_, String>(5)?,
             ))
         })
-        .map_err(|e| FreeBibleError::Generic {
+        .map_err(|e| XBibleError::Generic {
             error_message: format!("search_text_regex query: {e}"),
         })?;
 
@@ -660,7 +660,7 @@ fn search_reference(
     verse: Option<i32>,
     end_verse: Option<i32>,
     limit: i32,
-) -> Result<(Vec<SearchHit>, i32), FreeBibleError> {
+) -> Result<(Vec<SearchHit>, i32), XBibleError> {
     let Some(book_id) = resolve_book(conn, translation_id, book_norm) else {
         return Ok((Vec::new(), 0));
     };
@@ -713,7 +713,7 @@ fn search_reference(
     };
 
     let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
-    let mut stmt = conn.prepare(sql).map_err(|e| FreeBibleError::Generic {
+    let mut stmt = conn.prepare(sql).map_err(|e| XBibleError::Generic {
         error_message: format!("search_reference prepare: {e}"),
     })?;
 
@@ -731,7 +731,7 @@ fn search_reference(
                 highlights: Vec::new(),
             })
         })
-        .map_err(|e| FreeBibleError::Generic {
+        .map_err(|e| XBibleError::Generic {
             error_message: format!("search_reference query: {e}"),
         })?
         .filter_map(|r| r.ok())
@@ -749,14 +749,14 @@ fn search_strongs(
     conn: &Connection,
     strongs: &str,
     limit: i32,
-) -> Result<(Vec<SearchHit>, i32), FreeBibleError> {
+) -> Result<(Vec<SearchHit>, i32), XBibleError> {
     let mut stmt = conn
         .prepare(
             "SELECT strongs, lemma, transliteration, gloss, definition
              FROM lexicon WHERE strongs = ?1
              ORDER BY strongs LIMIT ?2",
         )
-        .map_err(|e| FreeBibleError::Generic {
+        .map_err(|e| XBibleError::Generic {
             error_message: format!("search_strongs prepare: {e}"),
         })?;
 
@@ -786,7 +786,7 @@ fn search_strongs(
                 highlights: Vec::new(),
             })
         })
-        .map_err(|e| FreeBibleError::Generic {
+        .map_err(|e| XBibleError::Generic {
             error_message: format!("search_strongs query: {e}"),
         })?
         .filter_map(|r| r.ok())
@@ -800,7 +800,7 @@ fn search_strongs(
 // FTS5 query construction
 // ═══════════════════════════════════════════════════════════════
 
-fn build_fts_query(text: &str, mode: SearchMode) -> Result<String, FreeBibleError> {
+fn build_fts_query(text: &str, mode: SearchMode) -> Result<String, XBibleError> {
     match mode {
         SearchMode::MultiWord => Ok(text
             .split_whitespace()
@@ -816,7 +816,7 @@ fn build_fts_query(text: &str, mode: SearchMode) -> Result<String, FreeBibleErro
             Ok(format!("\"{escaped}\""))
         }
 
-        SearchMode::Regex => Err(FreeBibleError::Generic {
+        SearchMode::Regex => Err(XBibleError::Generic {
             error_message: "build_fts_query called for regex mode".into(),
         }),
     }

@@ -10,7 +10,7 @@ use crate::sources::helloao::values::{
     BookCount, ChapterCount, Flag, LanguageCode, License, LicenseNotes, LicenseUrl, RawJson,
     TextDirection, VerseCount,
 };
-use crate::sources::{GenericCatalogBible, TextDirection as SourceTextDirection};
+use crate::sources::models::{GenericCatalogBible, TextDirection as SourceTextDirection};
 
 // ── Catalog Domain Types ──────────────────────────────────────────────────────
 

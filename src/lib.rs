@@ -16,12 +16,15 @@ extern crate log;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::{
-    db::connection::Db,
-    db::connection_state::{Closed, Open},
-    db::writer::DbWriter,
+    db::{
+        connection::Db,
+        connection_state::{Closed, Open},
+        writer::DbWriter,
+    },
     engines::audio_engine::engine::AudioEngine,
     error::XBibleError,
-    features::store::store_api::StoreApi,
+    features::{reader::XBibleReader, store::Store},
+    sources::helloao::HelloAOSource,
 };
 
 // ── Top-Level Modules ────────────────────────────────────────────────────────
@@ -103,7 +106,7 @@ pub unsafe extern "C" fn bz_internal_error(errcode: std::os::raw::c_int) {
 ///
 /// Owns the database handle and single-threaded writer across idempotent
 /// reopens (`set_db_path`) and exposes feature handles (`audio_engine`,
-/// `store`) to Kotlin (Android) and Swift (iOS / macOS).
+/// `reader`, `store`) to Kotlin (Android) and Swift (iOS / macOS).
 #[allow(dead_code)]
 #[derive(Debug, uniffi::Object)]
 pub struct XBibleEngine {
@@ -111,7 +114,14 @@ pub struct XBibleEngine {
     db: RwLock<Option<Db<Open>>>,
     writer: RwLock<Option<DbWriter>>,
     audio_engine: Arc<AudioEngine>,
-    store: Arc<StoreApi>,
+    reader: Arc<XBibleReader>,
+    store: Arc<Store>,
+}
+
+fn build_store() -> Arc<Store> {
+    let store: Arc<Store> = Store::new();
+    store.register_source(Arc::new(HelloAOSource::new()));
+    store
 }
 
 impl Default for XBibleEngine {
@@ -122,7 +132,8 @@ impl Default for XBibleEngine {
             db: RwLock::new(None),
             writer: RwLock::new(None),
             audio_engine: AudioEngine::new(),
-            store: StoreApi::new(),
+            reader: XBibleReader::new(),
+            store: build_store(),
         }
     }
 }
@@ -138,7 +149,8 @@ impl XBibleEngine {
             db: RwLock::new(None),
             writer: RwLock::new(None),
             audio_engine: AudioEngine::new(),
-            store: StoreApi::new(),
+            reader: XBibleReader::new(),
+            store: build_store(),
         })
     }
 
@@ -150,7 +162,7 @@ impl XBibleEngine {
     ///   2. shuts down and drops the old `DbWriter`
     ///   3. drops the old `Db<Open>` to close the old file handle
     ///   4. opens the database at `path` and runs migrations
-    ///   5. spawns a new `DbWriter` and reattaches it to `store`
+    ///   5. spawns a new `DbWriter` and reattaches it to `reader` and `store`
     pub fn set_db_path(&self, path: String) -> Result<(), XBibleError> {
         // 1. Cancel in-flight tasks before tearing down the writer.
         self.store.cancel_all_tasks();
@@ -172,13 +184,19 @@ impl XBibleEngine {
         let opened: Db<Open> = Db::<Closed>::open(&path)?;
         let shared = opened.share();
 
-        // 5. Spawn a new writer and attach both to `store`.
+        // 5. Spawn a new writer and attach shared connection to `reader` and `store`.
         let new_writer: DbWriter = DbWriter::spawn(shared.clone());
+        self.reader.attach_connection(shared.clone());
         self.store.attach_connection(shared, new_writer.clone());
 
         *self.writer.write().unwrap_or_else(|p| p.into_inner()) = Some(new_writer);
         *self.db.write().unwrap_or_else(|p| p.into_inner()) = Some(opened);
         Ok(())
+    }
+
+    /// Returns the reader engine handle (`reader`).
+    pub fn reader(&self) -> Arc<XBibleReader> {
+        self.reader.clone()
     }
 
     /// Returns the audio engine handle.
@@ -187,7 +205,7 @@ impl XBibleEngine {
     }
 
     /// Returns the store feature handle (`store`).
-    pub fn store(&self) -> Arc<StoreApi> {
+    pub fn store(&self) -> Arc<Store> {
         self.store.clone()
     }
 }

@@ -1,7 +1,8 @@
 use rusqlite::{Connection, Statement, params};
 
 use crate::error::XBibleError;
-use crate::sources::{GenericAudioSource, GenericCatalogBible, TextDirection};
+use crate::sources::models::TextDirection;
+use crate::sources::models::{GenericAudioSource, GenericCatalogBible};
 
 pub fn save_translations(
     conn: &Connection,

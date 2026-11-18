@@ -7,20 +7,33 @@
 
 pub mod catalog;
 pub mod client;
+pub mod entries;
 pub mod values;
 
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use rusqlite::Connection;
+use tokio::sync::Semaphore;
+use tokio::task::{JoinError, JoinSet};
 
 use crate::db::install::{persist_installed_bible, uninstall_translation};
 use crate::error::XBibleError;
+use crate::features::store::StoreItem;
+use crate::runtime::get_shared_runtime;
 use crate::sources::helloao::client::{
     HELLOAO_SOURCE_ID, HelloAOClient, HelloCommentaryMeta, HelloCommentaryProfile,
     HelloDatasetMeta, HelloEntitySummary, HelloLexiconEntry,
 };
-use crate::sources::{
-    BibleSource, GenericBook, GenericCatalogBible, GenericChapter, GenericInstalledBible,
-    InstallProgressSink,
+use crate::sources::helloao::entries::{FetchedEntityDataset, fetch_entity_dataset};
+use crate::sources::models::{
+    GenericBook, GenericBookChapters, GenericCatalogBible, GenericChapter, GenericInstalledBible,
+    TextDirection,
 };
+use crate::sources::{BibleSource, InstallProgressSink};
+
+const MAX_CONCURRENT_COMMENTARY_FETCHES: usize = 24;
 
 /// Adapter exposing HelloAO data and installation operations through `BibleSource`
 /// and source-specific helpers.
@@ -63,6 +76,14 @@ impl HelloAOSource {
             .map_err(|msg: String| XBibleError::Generic { error_message: msg })?;
         persist_installed_bible(conn, &bundle)?;
         Ok(bundle)
+    }
+
+    pub fn fetch_entities_for_install(
+        &self,
+        dataset_id: &str,
+        progress: &dyn InstallProgressSink,
+    ) -> Result<FetchedEntityDataset, String> {
+        fetch_entity_dataset(&self.client, dataset_id, progress)
     }
 
     /// Removes installed rows for a HelloAO translation and clears its `installed` flag.
@@ -222,6 +243,106 @@ impl BibleSource for HelloAOSource {
         self.client.list_catalog()
     }
 
+    fn list_items(&self) -> Result<Vec<StoreItem>, String> {
+        let mut items: Vec<StoreItem> = Vec::new();
+        let sid: String = HELLOAO_SOURCE_ID.to_string();
+
+        // 1. Translations -> StoreItem
+        let translations: Vec<GenericCatalogBible> = self.client.list_catalog()?;
+        for t in translations {
+            items.push(StoreItem {
+                id: t.id.clone(),
+                source_id: sid.clone(),
+                kind: "translation".to_string(),
+                name: t.name.clone(),
+                english_name: t.english_name.clone().unwrap_or_else(|| t.name.clone()),
+                short_name: t.short_name.clone().unwrap_or_else(|| t.id.clone()),
+                language: t.language_code.clone(),
+                language_name: t.language_name.clone(),
+                description: format!(
+                    "{} • {} books • {} verses",
+                    t.language_english_name
+                        .clone()
+                        .unwrap_or_else(|| t.language_code.clone()),
+                    t.book_count.unwrap_or(0),
+                    t.verse_count.unwrap_or(0),
+                ),
+                badge: None,
+                installed: false,
+                has_strongs: t.has_strongs.unwrap_or(false),
+                has_audio: t.has_audio,
+                book_count: t.book_count.unwrap_or(0),
+                chapter_count: t.chapter_count.unwrap_or(0),
+                verse_count: t.verse_count.unwrap_or(0),
+            });
+        }
+
+        // 2. Commentaries -> StoreItem
+        if let Ok(comms) = self.client.commentaries() {
+            for c in comms {
+                items.push(StoreItem {
+                    id: c.id.clone(),
+                    source_id: sid.clone(),
+                    kind: "commentary".to_string(),
+                    name: c.name.clone(),
+                    english_name: c.english_name.clone(),
+                    short_name: c.id.clone(),
+                    language: c.language.clone(),
+                    language_name: None,
+                    description: format!(
+                        "{} • {} books • {} chapters",
+                        c.language, c.number_of_books, c.total_number_of_chapters
+                    ),
+                    badge: Some("Commentary".to_string()),
+                    installed: false,
+                    has_strongs: false,
+                    has_audio: false,
+                    book_count: c.number_of_books,
+                    chapter_count: c.total_number_of_chapters,
+                    verse_count: c.total_number_of_verses,
+                });
+            }
+        }
+
+        // 3. Datasets & Relationship Modules -> StoreItem
+        if let Ok(datasets) = self.client.datasets() {
+            for d in datasets {
+                let is_theographic: bool = d.id.to_ascii_lowercase().contains("theographic");
+                let kind: &str = if is_theographic {
+                    "entity_set"
+                } else {
+                    "dataset"
+                };
+                let badge: Option<String> = if is_theographic {
+                    Some("Relationship Module".to_string())
+                } else {
+                    Some("Dataset".to_string())
+                };
+
+                items.push(StoreItem {
+                    id: d.id.clone(),
+                    source_id: sid.clone(),
+                    kind: kind.to_string(),
+                    name: d.name.clone(),
+                    english_name: d.english_name.clone(),
+                    short_name: d.id.clone(),
+                    language: d.language.clone(),
+                    language_name: None,
+                    description: format!("{} dataset ({})", d.english_name, d.language),
+                    badge,
+                    installed: false,
+                    has_strongs: false,
+                    has_audio: false,
+                    book_count: d.total_number_of_books,
+                    chapter_count: 0,
+                    verse_count: 0,
+                });
+            }
+        }
+
+        Ok(items)
+    }
+
     fn list_books(&self, bible_id: &str) -> Result<Vec<GenericBook>, String> {
         self.client.list_books(bible_id)
     }
@@ -241,5 +362,208 @@ impl BibleSource for HelloAOSource {
         progress: &dyn InstallProgressSink,
     ) -> Result<GenericInstalledBible, String> {
         self.client.fetch_for_install(bible_id, progress)
+    }
+
+    fn install_item(
+        &self,
+        item: &StoreItem,
+        progress: &dyn InstallProgressSink,
+    ) -> Result<GenericInstalledBible, String> {
+        if progress.is_cancelled() {
+            return Err("Installation cancelled".to_string());
+        }
+
+        match item.kind.as_str() {
+            "commentary" => {
+                progress.on_progress(
+                    "catalog".to_string(),
+                    0,
+                    2,
+                    Some(format!("Fetching commentary books for {}", item.id)),
+                );
+
+                let completed_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+                let counter_for_loop = Arc::clone(&completed_counter);
+                let books: Vec<GenericBook> = self.client.commentary_books(&item.id)?;
+                let mut tasks: Vec<(String, u32)> = Vec::new();
+                for book in &books {
+                    for ch_num in 1..=book.number_of_chapters {
+                        if ch_num > 0 {
+                            tasks.push((book.id.clone(), ch_num as u32));
+                        }
+                    }
+                }
+
+                let total_chapters: u32 = tasks.len() as u32;
+                progress.on_progress(
+                    "download".to_string(),
+                    0,
+                    total_chapters,
+                    Some(format!(
+                        "Downloading {} commentary chapters across {} books",
+                        total_chapters,
+                        books.len()
+                    )),
+                );
+
+                let runtime = get_shared_runtime();
+                let semaphore: Arc<Semaphore> =
+                    Arc::new(Semaphore::new(MAX_CONCURRENT_COMMENTARY_FETCHES));
+                let client_arc: Arc<HelloAOClient> = Arc::new(self.client.clone());
+                let commentary_id_arc: Arc<String> = Arc::new(item.id.clone());
+
+                let fetched: Vec<(String, GenericChapter)> = runtime.block_on(async move {
+                    let mut join_set: JoinSet<Option<(String, GenericChapter)>> = JoinSet::new();
+
+                    for (book_id, ch_num) in tasks {
+                        if progress.is_cancelled() {
+                            break;
+                        }
+                        let permit = match Arc::clone(&semaphore).acquire_owned().await {
+                            Ok(p) => p,
+                            Err(_) => break,
+                        };
+                        let client_ref = Arc::clone(&client_arc);
+                        let cid_ref = Arc::clone(&commentary_id_arc);
+
+                        join_set.spawn(async move {
+                            let _permit = permit;
+                            let book_id_for_fetch = book_id.clone();
+                            let cid_for_fetch = (*cid_ref).clone();
+
+                            let res: Result<GenericChapter, String> =
+                                tokio::task::spawn_blocking(move || {
+                                    client_ref.commentary_chapter(
+                                        &cid_for_fetch,
+                                        &book_id_for_fetch,
+                                        ch_num,
+                                    )
+                                })
+                                .await
+                                .unwrap_or_else(|e: JoinError| Err(e.to_string()));
+
+                            match res {
+                                Ok(ch) => Some((book_id, ch)),
+                                Err(err) => {
+                                    log::warn!(
+                                        "helloao commentary {} {} ch {} skipped: {}",
+                                        *cid_ref,
+                                        book_id,
+                                        ch_num,
+                                        err
+                                    );
+                                    None
+                                }
+                            }
+                        });
+                    }
+
+                    let mut out: Vec<(String, GenericChapter)> = Vec::new();
+
+                    while let Some(joined) = join_set.join_next().await {
+                        if let Ok(Some(pair)) = joined {
+                            out.push(pair);
+                            let done: u32 = counter_for_loop.fetch_add(1, Ordering::Relaxed) + 1;
+                            progress.on_progress(
+                                "download".to_string(),
+                                done,
+                                total_chapters,
+                                Some(format!("Downloaded {}/{} chapters", done, total_chapters)),
+                            );
+                        }
+                        if progress.is_cancelled() {
+                            join_set.abort_all();
+                            break;
+                        }
+                    }
+
+                    out
+                });
+
+                if progress.is_cancelled() {
+                    return Err("Commentary installation cancelled".to_string());
+                }
+
+                progress.on_progress(
+                    "normalize".to_string(),
+                    1,
+                    2,
+                    Some("Structuring commentary books and chapters".to_string()),
+                );
+
+                let mut grouped: HashMap<String, Vec<GenericChapter>> = HashMap::new();
+                for (book_id, ch) in fetched {
+                    grouped.entry(book_id).or_default().push(ch);
+                }
+
+                let mut chapters_by_book: Vec<GenericBookChapters> =
+                    Vec::with_capacity(books.len());
+                for book in &books {
+                    let mut chs: Vec<GenericChapter> = grouped.remove(&book.id).unwrap_or_default();
+                    chs.sort_by_key(|c: &GenericChapter| c.chapter_number);
+                    chapters_by_book.push(GenericBookChapters {
+                        book_id: book.id.clone(),
+                        chapters: chs,
+                    });
+                }
+
+                progress.on_progress("done".to_string(), 2, 2, None);
+
+                Ok(GenericInstalledBible {
+                    catalog: GenericCatalogBible {
+                        id: item.id.clone(),
+                        source_id: HELLOAO_SOURCE_ID.to_string(),
+                        name: item.name.clone(),
+                        english_name: Some(item.english_name.clone()),
+                        short_name: Some(item.short_name.clone()),
+                        language_code: item.language.clone(),
+                        language_name: item.language_name.clone(),
+                        language_english_name: None,
+                        text_direction: TextDirection::LeftToRight,
+                        book_count: Some(books.len() as i32),
+                        chapter_count: Some(total_chapters as i32),
+                        verse_count: Some(0),
+                        has_text: true,
+                        has_audio: false,
+                        has_strongs: Some(false),
+                        license_url: None,
+                        license_notes: None,
+                        audio_sources: Vec::new(),
+                    },
+                    books,
+                    chapters_by_book,
+                })
+            }
+
+            "entity_set" | "dataset" => {
+                let _dataset: FetchedEntityDataset =
+                    fetch_entity_dataset(&self.client, &item.id, progress)?;
+                Ok(GenericInstalledBible {
+                    catalog: GenericCatalogBible {
+                        id: item.id.clone(),
+                        source_id: HELLOAO_SOURCE_ID.to_string(),
+                        name: item.name.clone(),
+                        english_name: Some(item.english_name.clone()),
+                        short_name: Some(item.short_name.clone()),
+                        language_code: item.language.clone(),
+                        language_name: item.language_name.clone(),
+                        language_english_name: None,
+                        text_direction: TextDirection::LeftToRight,
+                        book_count: Some(0),
+                        chapter_count: Some(0),
+                        verse_count: Some(0),
+                        has_text: false,
+                        has_audio: false,
+                        has_strongs: Some(false),
+                        license_url: None,
+                        license_notes: None,
+                        audio_sources: Vec::new(),
+                    },
+                    books: Vec::new(),
+                    chapters_by_book: Vec::new(),
+                })
+            }
+            _ => self.client.fetch_for_install(&item.id, progress),
+        }
     }
 }
