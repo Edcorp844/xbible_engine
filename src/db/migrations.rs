@@ -356,18 +356,6 @@ const MIGRATIONS: &[M<'_>] = &[
         "#,
     ),
     // ── v8: book section ──────────────────────────────────────────
-    //
-    // `book_metadata.section` records which canonical group each
-    // book belongs to for the translation's selected canon. Values
-    // are short keys (see `install::section_for_book_id`), not
-    // labels: "ot", "nt", "deutero", "orthodox_extra",
-    // "ethiopian_extra", "unknown". The UI maps them to display
-    // names per translation, so a Catholic translation can show
-    // "Deuterocanonicals" where a Protestant one shows "Apocrypha".
-    //
-    // Default is "unknown" so a pre-v8 install is explicitly
-    // flagged as needing a rebuild rather than silently rendering
-    // every book under one group.
     M::up(
         r#"
         ALTER TABLE book_metadata
@@ -378,29 +366,41 @@ const MIGRATIONS: &[M<'_>] = &[
         "#,
     ),
     // ── v9: per-translation canon selection ───────────────────────
-    //
-    // `translations.selected_canon` records which canonical family
-    // the scholar chose for this translation. Values are short keys:
-    // "protestant", "catholic", "orthodox", "ethiopian", "all".
-    // The reader filters `get_books` by the sections visible in
-    // this canon; "all" shows every section including "unknown".
-    //
-    // This is a display choice, not a content rewrite: switching
-    // canon hides or reveals books, it never deletes them. A
-    // scholar can switch from "Protestant" to "All" and see the
-    // deuterocanonicals already in the DB, then switch back.
-    //
-    // Default is "protestant" so existing installs keep behaving
-    // the way they did before the canon picker existed.
     M::up(
         r#"
         ALTER TABLE translations
             ADD COLUMN selected_canon TEXT NOT NULL DEFAULT 'protestant';
         "#,
     ),
+    // ── v10: source provenance, counts, media flags & audio json ─
     M::up(
         r#"
-        ALTER TABLE translations DROP COLUMN selected_canon;
+        ALTER TABLE translations
+            ADD COLUMN source_id TEXT NOT NULL DEFAULT 'helloao';
+
+        ALTER TABLE translations
+            ADD COLUMN language_code TEXT NOT NULL DEFAULT '';
+
+        ALTER TABLE translations
+            ADD COLUMN book_count INTEGER NOT NULL DEFAULT 0;
+
+        ALTER TABLE translations
+            ADD COLUMN chapter_count INTEGER NOT NULL DEFAULT 0;
+
+        ALTER TABLE translations
+            ADD COLUMN verse_count INTEGER NOT NULL DEFAULT 0;
+
+        ALTER TABLE translations
+            ADD COLUMN has_text INTEGER NOT NULL DEFAULT 1;
+
+        ALTER TABLE translations
+            ADD COLUMN has_audio INTEGER NOT NULL DEFAULT 0;
+
+        ALTER TABLE translations
+            ADD COLUMN audio_sources_json TEXT NOT NULL DEFAULT '[]';
+
+        CREATE INDEX IF NOT EXISTS idx_translations_source
+            ON translations (source_id);
         "#,
     ),
 ];
@@ -476,6 +476,14 @@ mod tests {
             ("translations", "license_notes"),
             ("translations", "raw_json"),
             ("translations", "selected_canon"),
+            ("translations", "source_id"),
+            ("translations", "language_code"),
+            ("translations", "book_count"),
+            ("translations", "chapter_count"),
+            ("translations", "verse_count"),
+            ("translations", "has_text"),
+            ("translations", "has_audio"),
+            ("translations", "audio_sources_json"),
             ("commentaries", "license_notes"),
             ("commentaries", "raw_json"),
             ("datasets", "license_notes"),

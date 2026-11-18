@@ -1,4 +1,4 @@
-use crate::data::timeline_data::structs::{Event, Period};
+use crate::features::timeline::timeline_data::structs::{Event, Period};
 
 #[derive(Debug, Clone, uniffi::Object)]
 pub struct TimelineData {

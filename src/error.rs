@@ -1,26 +1,28 @@
 use crate::db::error::DbError;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
-pub enum FreeBibleError {
+pub enum XBibleError {
     #[error("{error_message}")]
     Generic { error_message: String },
 }
 
-impl From<String> for FreeBibleError {
+impl From<String> for XBibleError {
     fn from(s: String) -> Self {
-        FreeBibleError::Generic { error_message: s }
+        XBibleError::Generic { error_message: s }
     }
 }
 
-impl From<rusqlite::Error> for FreeBibleError {
+impl From<rusqlite::Error> for XBibleError {
     fn from(e: rusqlite::Error) -> Self {
-        FreeBibleError::Generic { error_message: e.to_string() }
+        XBibleError::Generic {
+            error_message: e.to_string(),
+        }
     }
 }
 
-impl From<DbError> for FreeBibleError {
+impl From<DbError> for XBibleError {
     fn from(e: DbError) -> Self {
-        FreeBibleError::Generic {
+        XBibleError::Generic {
             error_message: e.to_string(),
         }
     }

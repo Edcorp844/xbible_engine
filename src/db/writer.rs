@@ -8,7 +8,7 @@ use std::time::Duration;
 use log::{error, info};
 use rusqlite::Connection;
 
-use crate::engines::freebible_engine::error::FreeBibleError;
+use crate::error::XBibleError;
 
 const QUEUE_CAPACITY: usize = 256;
 
@@ -16,15 +16,14 @@ const QUEUE_CAPACITY: usize = 256;
 /// derefs to `Connection` but does NOT implement `DerefMut`, so the
 /// writer cannot hand a `&mut Connection` to the job. Every rusqlite
 /// write API (`execute`, `prepare`, `query_row`) only needs `&Connection`.
-pub(crate) type WriteJob =
-    Box<dyn FnOnce(&Connection) -> Result<(), FreeBibleError> + Send + 'static>;
+pub(crate) type WriteJob = Box<dyn FnOnce(&Connection) -> Result<(), XBibleError> + Send + 'static>;
 
 struct Job {
     id: u64,
     label: &'static str,
     cancel: Arc<AtomicBool>,
     work: WriteJob,
-    reply: SyncSender<Result<(), FreeBibleError>>,
+    reply: SyncSender<Result<(), XBibleError>>,
 }
 
 #[derive(Clone, Debug)]
@@ -71,9 +70,9 @@ impl DbWriter {
         label: &'static str,
         cancel: Arc<AtomicBool>,
         work: F,
-    ) -> Result<(), FreeBibleError>
+    ) -> Result<(), XBibleError>
     where
-        F: FnOnce(&Connection) -> Result<(), FreeBibleError> + Send + 'static,
+        F: FnOnce(&Connection) -> Result<(), XBibleError> + Send + 'static,
     {
         debug_assert!(
             !is_main_thread(),
@@ -84,7 +83,7 @@ impl DbWriter {
             return Err(cancelled());
         }
 
-        let (reply_tx, reply_rx) = mpsc::sync_channel::<Result<(), FreeBibleError>>(1);
+        let (reply_tx, reply_rx) = mpsc::sync_channel::<Result<(), XBibleError>>(1);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         self.depth.fetch_add(1, Ordering::Relaxed);
@@ -98,13 +97,13 @@ impl DbWriter {
 
         if self.tx.send(job).is_err() {
             self.depth.fetch_sub(1, Ordering::Relaxed);
-            return Err(FreeBibleError::Generic {
+            return Err(XBibleError::Generic {
                 error_message: "db writer thread is gone".into(),
             });
         }
 
         reply_rx.recv().unwrap_or_else(|_| {
-            Err(FreeBibleError::Generic {
+            Err(XBibleError::Generic {
                 error_message: "db writer dropped job without reply".into(),
             })
         })
@@ -138,7 +137,7 @@ fn writer_loop(
 
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             let mut guard = conn.lock().unwrap_or_else(|p| p.into_inner());
-            let tx = guard.transaction().map_err(|e| FreeBibleError::Generic {
+            let tx = guard.transaction().map_err(|e| XBibleError::Generic {
                 error_message: format!("begin tx job#{} {}: {}", job.id, job.label, e),
             })?;
 
@@ -147,7 +146,7 @@ fn writer_loop(
             // finalizes it. Dropping `tx` on the `?` path rolls back.
             (job.work)(&tx)?;
 
-            tx.commit().map_err(|e| FreeBibleError::Generic {
+            tx.commit().map_err(|e| XBibleError::Generic {
                 error_message: format!("commit job#{} {}: {}", job.id, job.label, e),
             })
         }));
@@ -157,7 +156,7 @@ fn writer_loop(
             Err(panic) => {
                 let msg = panic_message(&panic);
                 error!("db writer job#{} {} panicked: {}", job.id, job.label, msg);
-                Err(FreeBibleError::Generic {
+                Err(XBibleError::Generic {
                     error_message: format!("db write panicked in {}: {}", job.label, msg),
                 })
             }
@@ -169,8 +168,8 @@ fn writer_loop(
     info!("db writer thread exiting");
 }
 
-fn cancelled() -> FreeBibleError {
-    FreeBibleError::Generic {
+fn cancelled() -> XBibleError {
+    XBibleError::Generic {
         error_message: "cancelled".into(),
     }
 }

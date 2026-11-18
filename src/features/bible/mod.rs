@@ -1,15 +1,5 @@
 // freebible_engine/mod.rs
-
-pub mod catalog;
-pub mod client;
-pub mod error;
-pub mod install;
 pub mod reader;
-pub mod search;
-pub mod store;
-pub mod store_api;
-pub mod utils;
-pub mod values;
 
 use std::sync::{Arc, RwLock};
 
@@ -17,9 +7,6 @@ use crate::db::connection::Db;
 use crate::db::connection_state::Closed;
 use crate::db::connection_state::Open;
 use crate::db::writer::DbWriter;
-use crate::engines::freebible_engine::error::FreeBibleError;
-use crate::engines::freebible_engine::reader::FreeBibleReader;
-use crate::engines::freebible_engine::store_api::FreeBibleStore;
 
 /// Top-level FreeBible engine.
 ///

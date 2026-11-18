@@ -326,6 +326,7 @@ fn fts_index_populates_on_insert_and_clears_on_delete() {
                 raw_json: "{}".into(),
             },
         ],
+        is_apocryphal: false,
     };
 
     xbible_engine::engines::freebible_engine::install::persist_book(&conn, "TST", &book)

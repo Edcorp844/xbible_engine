@@ -1,8 +1,10 @@
 use rusqlite::Connection;
 
+pub mod catalog;
 pub mod connection;
 pub mod connection_state;
 pub mod error;
+pub mod install;
 mod migrations;
 pub mod writer;
 
