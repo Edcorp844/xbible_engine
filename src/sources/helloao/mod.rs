@@ -3,7 +3,7 @@
 //! Wraps `HelloAOClient` and implements `BibleSource` so `helloao` endpoint
 //! details, raw JSON parsing, and API quirks remain isolated behind normalized
 //! `Generic*` structures, while providing explicit installation and
-//! uninstallation methods for HelloAO translations.
+//! uninstallation methods for HelloAO translations and entity datasets[cite: 6, 7].
 
 pub mod catalog;
 pub mod client;
@@ -26,7 +26,9 @@ use crate::sources::helloao::client::{
     HELLOAO_SOURCE_ID, HelloAOClient, HelloCommentaryMeta, HelloCommentaryProfile,
     HelloDatasetMeta, HelloEntitySummary, HelloLexiconEntry,
 };
-use crate::sources::helloao::entries::{FetchedEntityDataset, fetch_entity_dataset};
+use crate::sources::helloao::entries::{
+    FetchedEntityDataset, fetch_entity_dataset, persist_entity_dataset,
+};
 use crate::sources::models::{
     GenericBook, GenericBookChapters, GenericCatalogBible, GenericChapter, GenericInstalledBible,
     TextDirection,
@@ -36,35 +38,35 @@ use crate::sources::{BibleSource, InstallProgressSink};
 const MAX_CONCURRENT_COMMENTARY_FETCHES: usize = 24;
 
 /// Adapter exposing HelloAO data and installation operations through `BibleSource`
-/// and source-specific helpers.
+/// and source-specific helpers[cite: 7].
 #[derive(Debug, Clone)]
 pub struct HelloAOSource {
     client: HelloAOClient,
 }
 
 impl HelloAOSource {
-    /// Creates a new `HelloAOSource` using the default HelloAO endpoint.
+    /// Creates a new `HelloAOSource` using the default HelloAO endpoint[cite: 7].
     pub fn new() -> Self {
         let client: HelloAOClient = HelloAOClient::new();
         Self { client }
     }
 
     /// Creates a new `HelloAOSource` with a custom base URL (useful for tests
-    /// or alternative mirrors).
+    /// or alternative mirrors)[cite: 7].
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         let client: HelloAOClient = HelloAOClient::with_base_url(base_url);
         Self { client }
     }
 
     /// Returns a reference to the underlying `HelloAOClient` for source-specific
-    /// operations (such as HelloAO commentaries, profiles, or datasets).
+    /// operations (such as HelloAO commentaries, profiles, or datasets)[cite: 7].
     pub fn client(&self) -> &HelloAOClient {
         &self.client
     }
 
-    // ── Translation Install & Uninstall ───────────────────────────────────────
+    // ── Translation & Entity Install / Uninstall ──────────────────────────────
 
-    /// Downloads, normalizes, and persists a HelloAO translation into SQLite.
+    /// Downloads, normalizes, and persists a HelloAO translation into SQLite[cite: 7].
     pub fn install_translation(
         &self,
         conn: &Connection,
@@ -78,6 +80,7 @@ impl HelloAOSource {
         Ok(bundle)
     }
 
+    /// Fetches an entity dataset from HelloAO[cite: 3, 7].
     pub fn fetch_entities_for_install(
         &self,
         dataset_id: &str,
@@ -86,7 +89,48 @@ impl HelloAOSource {
         fetch_entity_dataset(&self.client, dataset_id, progress)
     }
 
-    /// Removes installed rows for a HelloAO translation and clears its `installed` flag.
+    /// Fetches and persists an entity dataset (`people`, `events`, `places`,
+    /// `people_groups`, and `entity_install_state`) into SQLite[cite: 3, 7].
+    pub fn install_entity_dataset(
+        &self,
+        conn: &Connection,
+        dataset_id: &str,
+        progress: &dyn InstallProgressSink,
+    ) -> Result<FetchedEntityDataset, XBibleError> {
+        let dataset: FetchedEntityDataset =
+            fetch_entity_dataset(&self.client, dataset_id, progress)
+                .map_err(|msg: String| XBibleError::Generic { error_message: msg })?;
+
+        let total_entities: usize = dataset.entities.len();
+        progress.on_progress(
+            "persist".to_string(),
+            0,
+            total_entities as u32,
+            Some(format!(
+                "Persisting {total_entities} entities for {dataset_id}"
+            )),
+        );
+
+        persist_entity_dataset(conn, &dataset, &mut |done, total, label| {
+            progress.on_progress(
+                "persist".to_string(),
+                done as u32,
+                total as u32,
+                Some(format!("Writing {label} ({done}/{total})")),
+            );
+        })?;
+
+        progress.on_progress(
+            "done".to_string(),
+            1,
+            1,
+            Some(format!("{dataset_id} installed")),
+        );
+
+        Ok(dataset)
+    }
+
+    /// Removes installed rows for a HelloAO translation and clears its `installed` flag[cite: 4, 7].
     pub fn uninstall_translation(
         &self,
         conn: &Connection,
@@ -97,19 +141,19 @@ impl HelloAOSource {
 
     // ── Source-Specific Helpers (HelloAO Commentaries & Datasets) ────────────
 
-    /// Lists available HelloAO commentaries.
+    /// Lists available HelloAO commentaries[cite: 7].
     pub fn commentaries(&self) -> Result<Vec<HelloCommentaryMeta>, String> {
         let list: Vec<HelloCommentaryMeta> = self.client.commentaries()?;
         Ok(list)
     }
 
-    /// Lists books for a HelloAO commentary normalized into `GenericBook`.
+    /// Lists books for a HelloAO commentary normalized into `GenericBook`[cite: 7].
     pub fn commentary_books(&self, commentary_id: &str) -> Result<Vec<GenericBook>, String> {
         let books: Vec<GenericBook> = self.client.commentary_books(commentary_id)?;
         Ok(books)
     }
 
-    /// Fetches a single HelloAO commentary chapter normalized into `GenericChapter`.
+    /// Fetches a single HelloAO commentary chapter normalized into `GenericChapter`[cite: 7].
     pub fn commentary_chapter(
         &self,
         commentary_id: &str,
@@ -122,7 +166,7 @@ impl HelloAOSource {
         Ok(ch)
     }
 
-    /// Lists available profiles for a HelloAO commentary.
+    /// Lists available profiles for a HelloAO commentary[cite: 7].
     pub fn commentary_profiles(
         &self,
         commentary_id: &str,
@@ -132,7 +176,7 @@ impl HelloAOSource {
         Ok(profiles)
     }
 
-    /// Fetches a specific profile for a HelloAO commentary.
+    /// Fetches a specific profile for a HelloAO commentary[cite: 7].
     pub fn commentary_profile(
         &self,
         commentary_id: &str,
@@ -143,37 +187,37 @@ impl HelloAOSource {
         Ok(profile)
     }
 
-    /// Lists available HelloAO datasets.
+    /// Lists available HelloAO datasets[cite: 7].
     pub fn datasets(&self) -> Result<Vec<HelloDatasetMeta>, String> {
         let list: Vec<HelloDatasetMeta> = self.client.datasets()?;
         Ok(list)
     }
 
-    /// Lists people entities for a HelloAO dataset.
+    /// Lists people entities for a HelloAO dataset[cite: 7].
     pub fn dataset_people_list(&self, dataset_id: &str) -> Result<Vec<HelloEntitySummary>, String> {
         let list: Vec<HelloEntitySummary> = self.client.dataset_people_list(dataset_id)?;
         Ok(list)
     }
 
-    /// Lists event entities for a HelloAO dataset.
+    /// Lists event entities for a HelloAO dataset[cite: 7].
     pub fn dataset_events_list(&self, dataset_id: &str) -> Result<Vec<HelloEntitySummary>, String> {
         let list: Vec<HelloEntitySummary> = self.client.dataset_events_list(dataset_id)?;
         Ok(list)
     }
 
-    /// Lists place entities for a HelloAO dataset.
+    /// Lists place entities for a HelloAO dataset[cite: 7].
     pub fn dataset_places_list(&self, dataset_id: &str) -> Result<Vec<HelloEntitySummary>, String> {
         let list: Vec<HelloEntitySummary> = self.client.dataset_places_list(dataset_id)?;
         Ok(list)
     }
 
-    /// Lists group entities for a HelloAO dataset.
+    /// Lists group entities for a HelloAO dataset[cite: 7].
     pub fn dataset_groups_list(&self, dataset_id: &str) -> Result<Vec<HelloEntitySummary>, String> {
         let list: Vec<HelloEntitySummary> = self.client.dataset_groups_list(dataset_id)?;
         Ok(list)
     }
 
-    /// Fetches raw JSON for a single person entity in a HelloAO dataset.
+    /// Fetches raw JSON for a single person entity in a HelloAO dataset[cite: 7].
     pub fn dataset_person(
         &self,
         dataset_id: &str,
@@ -183,7 +227,7 @@ impl HelloAOSource {
         Ok(val)
     }
 
-    /// Fetches raw JSON for a single event entity in a HelloAO dataset.
+    /// Fetches raw JSON for a single event entity in a HelloAO dataset[cite: 7].
     pub fn dataset_event(
         &self,
         dataset_id: &str,
@@ -193,7 +237,7 @@ impl HelloAOSource {
         Ok(val)
     }
 
-    /// Fetches raw JSON for a single place entity in a HelloAO dataset.
+    /// Fetches raw JSON for a single place entity in a HelloAO dataset[cite: 7].
     pub fn dataset_place(
         &self,
         dataset_id: &str,
@@ -203,7 +247,7 @@ impl HelloAOSource {
         Ok(val)
     }
 
-    /// Fetches raw JSON for a single group entity in a HelloAO dataset.
+    /// Fetches raw JSON for a single group entity in a HelloAO dataset[cite: 7].
     pub fn dataset_group(
         &self,
         dataset_id: &str,
@@ -213,7 +257,7 @@ impl HelloAOSource {
         Ok(val)
     }
 
-    /// Fetches a lexicon entry by Strong's code from a HelloAO dataset.
+    /// Fetches a lexicon entry by Strong's code from a HelloAO dataset[cite: 7].
     pub fn lexicon_entry(
         &self,
         dataset_id: &str,
@@ -247,7 +291,7 @@ impl BibleSource for HelloAOSource {
         let mut items: Vec<StoreItem> = Vec::new();
         let sid: String = HELLOAO_SOURCE_ID.to_string();
 
-        // 1. Translations -> StoreItem
+        // 1. Translations -> StoreItem[cite: 7]
         let translations: Vec<GenericCatalogBible> = self.client.list_catalog()?;
         for t in translations {
             items.push(StoreItem {
@@ -277,7 +321,7 @@ impl BibleSource for HelloAOSource {
             });
         }
 
-        // 2. Commentaries -> StoreItem
+        // 2. Commentaries -> StoreItem[cite: 7]
         if let Ok(comms) = self.client.commentaries() {
             for c in comms {
                 items.push(StoreItem {
@@ -304,7 +348,7 @@ impl BibleSource for HelloAOSource {
             }
         }
 
-        // 3. Datasets & Relationship Modules -> StoreItem
+        // 3. Datasets & Relationship Modules -> StoreItem[cite: 7]
         if let Ok(datasets) = self.client.datasets() {
             for d in datasets {
                 let is_theographic: bool = d.id.to_ascii_lowercase().contains("theographic");
@@ -536,8 +580,27 @@ impl BibleSource for HelloAOSource {
             }
 
             "entity_set" | "dataset" => {
-                let _dataset: FetchedEntityDataset =
+                let dataset: FetchedEntityDataset =
                     fetch_entity_dataset(&self.client, &item.id, progress)?;
+
+                let total_entities: usize = dataset.entities.len();
+                progress.on_progress(
+                    "persist".to_string(),
+                    0,
+                    total_entities as u32,
+                    Some(format!(
+                        "Prepared {total_entities} entities for {}",
+                        item.id
+                    )),
+                );
+
+                progress.on_progress(
+                    "done".to_string(),
+                    1,
+                    1,
+                    Some(format!("{} fetched ({total_entities} entities)", item.id)),
+                );
+
                 Ok(GenericInstalledBible {
                     catalog: GenericCatalogBible {
                         id: item.id.clone(),

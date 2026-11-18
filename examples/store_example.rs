@@ -150,24 +150,24 @@ pub fn install_three_items(
         .refresh()
         .map_err(|e| format!("refresh failed: {e:?}"))?;
 
-    // // 1. Non-BSB Bible translation
-    // let bible: StoreItem = pick_non_bsb_translation(&store, explicit_bible_id)?;
-    // debug!("[1/3] Installing '{}' ({})", bible.name, bible.id);
-    // /let bible_task: String = store
-    //     .install(bible)
-    //     .map_err(|e| format!("bible install start failed: {e:?}"))?;
-    // poll_until_done(&store, bible_task)?;
+    // 1. Non-BSB Bible translation
+    let bible: StoreItem = pick_non_bsb_translation(&store, explicit_bible_id)?;
+    debug!("[1/3] Installing '{}' ({})", bible.name, bible.id);
+    let bible_task: String = store
+        .install(bible)
+        .map_err(|e| format!("bible install start failed: {e:?}"))?;
+    poll_until_done(&store, bible_task)?;
 
-    // // 2. Commentary
-    // if let Some(commentary) = pick_commentary(&store) {
-    //     debug!("[2/3] Installing '{}' ({})", commentary.name, commentary.id);
-    //     let comm_task: String = store
-    //         .install(commentary)
-    //         .map_err(|e| format!("commentary install start failed: {e:?}"))?;
-    //     poll_until_done(&store, comm_task)?;
-    // } else {
-    //     error!("[2/3] No commentary item found.");
-    // }
+    // 2. Commentary
+    if let Some(commentary) = pick_commentary(&store) {
+        debug!("[2/3] Installing '{}' ({})", commentary.name, commentary.id);
+        let comm_task: String = store
+            .install(commentary)
+            .map_err(|e| format!("commentary install start failed: {e:?}"))?;
+        poll_until_done(&store, comm_task)?;
+    } else {
+        error!("[2/3] No commentary item found.");
+    }
 
     // 3. People item (`theographic:person` or matching entity_set/dataset)
     // 3. People item (`theographic:person` or matching entity_set/dataset)

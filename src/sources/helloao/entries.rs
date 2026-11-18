@@ -62,6 +62,55 @@ pub struct FetchedEntityDataset {
     pub entities: Vec<FetchedEntityPayload>,
 }
 
+const PERSON_REFS: &[(&str, &str, &str)] = &[
+    ("birthPlace", "birth_place", "place"),
+    ("deathPlace", "death_place", "place"),
+    ("father", "father", "person"),
+    ("mother", "mother", "person"),
+    ("partners", "partner", "person"),
+    ("children", "child", "person"),
+    ("siblings", "sibling", "person"),
+    (
+        "halfSiblingsSameFather",
+        "half_sibling_same_father",
+        "person",
+    ),
+    (
+        "halfSiblingsSameMother",
+        "half_sibling_same_mother",
+        "person",
+    ),
+    ("memberOf", "member_of", "group"),
+    ("events", "participated_in", "event"),
+];
+
+const EVENT_REFS: &[(&str, &str, &str)] = &[
+    ("participants", "participant", "person"),
+    ("locations", "location", "place"),
+    ("predecessor", "predecessor", "event"),
+    ("successor", "successor", "event"),
+    ("partOf", "part_of", "event"),
+];
+
+const PLACE_REFS: &[(&str, &str, &str)] = &[("events", "event_here", "event")];
+
+const GROUP_REFS: &[(&str, &str, &str)] = &[
+    ("members", "member", "person"),
+    ("leaders", "leader", "person"),
+    ("leader", "leader", "person"),
+    ("locatedAt", "located_at", "place"),
+];
+
+fn normalize_kind(api_type: &str) -> &str {
+    match api_type {
+        "people" => "person",
+        "places" => "place",
+        "events" => "event",
+        "groups" => "group",
+        other => other,
+    }
+}
+
 fn join_description(val: &serde_json::Value) -> Option<String> {
     match val {
         serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
@@ -298,6 +347,28 @@ pub fn persist_entity_dataset(
             }
         };
 
+        let refs_table: &[(&str, &str, &str)] = match item.kind {
+            EntityKind::Person => PERSON_REFS,
+            EntityKind::Event => EVENT_REFS,
+            EntityKind::Place => PLACE_REFS,
+            EntityKind::Group => GROUP_REFS,
+        };
+        write_entity_refs(
+            conn,
+            &dataset.dataset_id,
+            item.kind.as_str(),
+            &entity_id,
+            obj,
+            refs_table,
+        )?;
+        write_verse_refs(
+            conn,
+            &dataset.dataset_id,
+            item.kind.as_str(),
+            &entity_id,
+            obj,
+        )?;
+
         let label: &str = obj
             .get("name")
             .and_then(|v| v.as_str())
@@ -524,4 +595,97 @@ fn write_group(
     })?;
 
     Ok(id)
+}
+
+fn write_entity_refs(
+    conn: &Connection,
+    dataset_id: &str,
+    source_kind: &str,
+    source_id: &str,
+    obj: &serde_json::Value,
+    table: &[(&str, &str, &str)],
+) -> Result<(), XBibleError> {
+    for (field, relation, default_kind) in table {
+        let Some(value) = obj.get(*field) else {
+            continue;
+        };
+
+        let items: Vec<&serde_json::Value> = match value {
+            serde_json::Value::Array(arr) => arr.iter().collect(),
+            serde_json::Value::Object(_) => vec![value],
+            _ => continue,
+        };
+
+        for item in items {
+            let Some(target_id) = item.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let target_name: Option<&str> = item.get("name").and_then(|v| v.as_str());
+            let target_kind: &str = item
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map(normalize_kind)
+                .unwrap_or(*default_kind);
+
+            conn.execute(
+                "INSERT OR REPLACE INTO entity_refs
+                 (dataset_id, source_kind, source_id, relation,
+                  target_kind, target_id, target_name)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    dataset_id,
+                    source_kind,
+                    source_id,
+                    relation,
+                    target_kind,
+                    target_id,
+                    target_name,
+                ],
+            )
+            .map_err(|e| XBibleError::Generic {
+                error_message: format!("entity_refs insert: {e}"),
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn write_verse_refs(
+    conn: &Connection,
+    dataset_id: &str,
+    source_kind: &str,
+    source_id: &str,
+    obj: &serde_json::Value,
+) -> Result<(), XBibleError> {
+    let Some(refs) = obj.get("references").and_then(|v| v.as_array()) else {
+        return Ok(());
+    };
+
+    for r in refs {
+        let Some(book) = r.get("book").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let chapter: i32 = r.get("chapter").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let verse: i32 = r.get("verse").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let end_verse: Option<i32> = r.get("endVerse").and_then(|v| v.as_i64()).map(|x| x as i32);
+
+        conn.execute(
+            "INSERT OR REPLACE INTO entity_verse_refs
+             (dataset_id, source_kind, source_id, book, chapter, verse, end_verse)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                dataset_id,
+                source_kind,
+                source_id,
+                book,
+                chapter,
+                verse,
+                end_verse
+            ],
+        )
+        .map_err(|e| XBibleError::Generic {
+            error_message: format!("entity_verse_refs insert: {e}"),
+        })?;
+    }
+    Ok(())
 }

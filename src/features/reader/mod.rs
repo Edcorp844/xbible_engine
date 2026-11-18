@@ -201,6 +201,36 @@ fn section_wire_key(section: &CanonicalSection) -> String {
     }
 }
 
+fn canonical_book_rank(book_id: &str) -> usize {
+    const CANONICAL_IDS: &[&str] = &[
+        // Old Testament
+        "GEN", "EXO", "LEV", "NUM", "DEU", "JOS", "JDG", "RUT", "1SA", "2SA", "1KI", "2KI", "1CH",
+        "2CH", "EZR", "NEH", "EST", "JOB", "PSA", "PRO", "ECC", "SNG", "ISA", "JER", "LAM", "EZK",
+        "DAN", "HOS", "JOL", "AMO", "OBA", "JON", "MIC", "NAM", "HAB", "ZEP", "HAG", "ZEC", "MAL",
+        // New Testament
+        "MAT", "MRK", "LUK", "JHN", "ACT", "ROM", "1CO", "2CO", "GAL", "EPH", "PHP", "COL", "1TH",
+        "2TH", "1TI", "2TI", "TIT", "PHM", "HEB", "JAS", "1PE", "2PE", "1JN", "2JN", "3JN", "JUD",
+        "REV", // Deuterocanon / Apocrypha & Extras
+        "TOB", "JDT", "ESG", "WIS", "SIR", "BAR", "LJE", "S3Y", "SUS", "BEL", "1MA", "2MA", "1ES",
+        "MAN", "2ES", "3MA", "4MA", "DAG", "ADE", "ENO", "JUB", "1MQ", "2MQ", "3MQ", "4BA",
+    ];
+    let upper = book_id.trim().to_ascii_uppercase();
+    CANONICAL_IDS
+        .iter()
+        .position(|&id| id == upper)
+        .unwrap_or(usize::MAX)
+}
+
+fn sort_section_books(books: &mut [GenericBook]) {
+    books.sort_by(|a, b| {
+        a.book_order
+            .unwrap_or(i32::MAX)
+            .cmp(&b.book_order.unwrap_or(i32::MAX))
+            .then_with(|| canonical_book_rank(&a.id).cmp(&canonical_book_rank(&b.id)))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+}
+
 fn parse_text_direction(raw: &str) -> TextDirection {
     match raw.trim().to_ascii_lowercase().as_str() {
         "rtl" | "right_to_left" | "righttoleft" => TextDirection::RightToLeft,
@@ -948,11 +978,11 @@ impl XBibleReader {
 
         let canonical_order = [
             "ot",
+            "nt",
             "deutero",
             "orthodox_extra",
             "ethiopian_extra",
             "unknown",
-            "nt",
         ];
 
         let mut grouped: BTreeMap<String, Vec<GenericBook>> = BTreeMap::new();
@@ -963,22 +993,24 @@ impl XBibleReader {
 
         let mut result = Vec::new();
         for key in canonical_order {
-            if let Some(books) = grouped.remove(key) {
-                if !books.is_empty() {
+            if let Some(mut section_books) = grouped.remove(key) {
+                if !section_books.is_empty() {
+                    sort_section_books(&mut section_books);
                     result.push(BookSection {
                         section: parse_canonical_section(key),
                         section_key: key.to_string(),
-                        books,
+                        books: section_books,
                     });
                 }
             }
         }
-        for (key, books) in grouped {
-            if !books.is_empty() {
+        for (key, mut section_books) in grouped {
+            if !section_books.is_empty() {
+                sort_section_books(&mut section_books);
                 result.push(BookSection {
                     section: parse_canonical_section(&key),
                     section_key: key,
-                    books,
+                    books: section_books,
                 });
             }
         }

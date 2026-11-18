@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::features::timeline::timeline_data::structs::{Event, Period};
 
 #[derive(Debug, Clone, uniffi::Object)]
@@ -8,7 +10,7 @@ pub struct TimelineData {
 #[uniffi::export]
 impl TimelineData {
     #[uniffi::constructor]
-    pub fn new() -> Self {
+    pub fn new() -> Arc<Self> {
         let period_1 = Period {
             id: "1".to_string(),
             image: "http://timeline.biblehistory.com/css/img/period_1.jpg".to_string(),
@@ -7199,12 +7201,12 @@ impl TimelineData {
         ],
     };
 
-        Self {
+        Arc::new(Self {
             data: vec![
                 period_1, period_2, period_3, period_4, period_5, period_6, period_7, period_8,
                 period_9, period_10, period_11, period_12, period_13,
             ],
-        }
+        })
     }
 
     pub fn get_data(&self) -> Vec<Period> {

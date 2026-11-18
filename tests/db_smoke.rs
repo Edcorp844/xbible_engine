@@ -1,16 +1,17 @@
-//! Integration tests for the shared SQLite layer.
+//! Integration tests for the shared SQLite layer, generic models, and search.
 //!
 //! These live in `tests/` (a separate crate), so they reach the
-//! engine through `xbible_engine::` exactly as an external consumer
-//! would. That requires `db::open` and `install::persist_book` to be
-//! `pub` rather than `pub(crate)` — both are, so the tests exercise
-//! the same code path the engine uses without going through the
-//! network.
+//! engine through `xbible_engine::` as an external consumer would.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rusqlite::Connection;
-use xbible_engine::engines::freebible_engine::search::SearchFilter;
+use rusqlite::{Connection, params};
+use xbible_engine::features::reader::search::{SearchFilter, SearchMode, search};
+use xbible_engine::sources::models::{
+    CanonicalSection, GenericAudioSource, GenericBook, GenericChapter, GenericChapterItem,
+    GenericFootnote, GenericTextSpan, GenericVerse, LexicalInfo, SpanFormatting, SpanKind,
+    TextDirection,
+};
 
 // ── Temp file guard ─────────────────────────────────────────────
 
@@ -43,6 +44,7 @@ impl TempDb {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(format!("{path}-wal"));
         let _ = std::fs::remove_file(format!("{path}-shm"));
+        let _ = std::fs::remove_file(format!("{path}-journal"));
     }
 }
 
@@ -67,7 +69,7 @@ fn table_exists(conn: &Connection, name: &str) -> bool {
 fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
-        [table, column],
+        params![table, column],
         |r| r.get::<_, i32>(0),
     )
     .map(|n| n > 0)
@@ -79,6 +81,139 @@ fn user_version(conn: &Connection) -> i32 {
         .unwrap_or(0)
 }
 
+fn section_db_key(section: &CanonicalSection) -> &'static str {
+    match section {
+        CanonicalSection::OldTestament => "ot",
+        CanonicalSection::NewTestament => "nt",
+        CanonicalSection::Deuterocanon => "deutero",
+        CanonicalSection::OrthodoxExtra => "orthodox_extra",
+        CanonicalSection::EthiopianExtra => "ethiopian_extra",
+        CanonicalSection::Unknown => "unknown",
+        CanonicalSection::Custom(_) => "custom",
+    }
+}
+
+fn seed_translation(conn: &Connection, id: &str, source_id: &str) {
+    conn.execute(
+        "INSERT INTO translations
+            (id, name, english_name, short_name, language, language_code,
+             text_direction, number_of_books, total_number_of_chapters,
+             total_number_of_verses, installed, has_strongs, source_id)
+         VALUES (?1, 'Test Bible', 'Test Bible', ?1, 'eng', 'en',
+                 'ltr', 2, 2, 4, 1, 1, ?2)",
+        params![id, source_id],
+    )
+    .unwrap();
+}
+
+fn persist_generic_book_and_chapters(
+    conn: &Connection,
+    book: &GenericBook,
+    chapters: &[GenericChapter],
+) {
+    conn.execute(
+        "INSERT OR REPLACE INTO books (translation_id, id, name, number_of_chapters)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            book.translation_id,
+            book.id,
+            book.name,
+            book.number_of_chapters
+        ],
+    )
+    .unwrap();
+
+    conn.execute(
+        "INSERT OR REPLACE INTO book_metadata
+            (translation_id, book_id, common_name, title, book_order,
+             audio_links_json, raw_json, section)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            book.translation_id,
+            book.id,
+            book.common_name,
+            book.title,
+            book.book_order,
+            book.audio_links_json,
+            book.raw_json,
+            section_db_key(&book.section),
+        ],
+    )
+    .unwrap();
+
+    for ch in chapters {
+        conn.execute(
+            "INSERT OR REPLACE INTO chapter_raw
+                (translation_id, book_id, chapter, raw_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                ch.translation_id,
+                ch.book_id,
+                ch.chapter_number,
+                ch.raw_json
+            ],
+        )
+        .unwrap();
+
+        for item in &ch.items {
+            let footnotes_csv = if item.footnote_ids.is_empty() {
+                None
+            } else {
+                Some(item.footnote_ids.join(","))
+            };
+            conn.execute(
+                "INSERT OR REPLACE INTO chapter_items
+                    (translation_id, book_id, chapter, position, item_type,
+                     verse_number, text, poem, words_of_jesus, footnote_ids, raw_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    ch.translation_id,
+                    ch.book_id,
+                    ch.chapter_number,
+                    item.position,
+                    item.item_type,
+                    item.verse_number,
+                    item.text,
+                    i32::from(item.is_poem),
+                    i32::from(item.is_words_of_jesus),
+                    footnotes_csv,
+                    item.raw_json,
+                ],
+            )
+            .unwrap();
+        }
+
+        for v in &ch.verses {
+            conn.execute(
+                "INSERT OR REPLACE INTO verses
+                    (translation_id, book_id, chapter, verse, text)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![ch.translation_id, v.book_id, v.chapter, v.verse, v.text],
+            )
+            .unwrap();
+        }
+
+        for note in &ch.footnotes {
+            conn.execute(
+                "INSERT OR REPLACE INTO footnotes
+                    (translation_id, book_id, chapter, note_id, caller, text, reference, raw_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    ch.translation_id,
+                    ch.book_id,
+                    ch.chapter_number,
+                    note.note_id,
+                    note.caller,
+                    note.text,
+                    note.reference,
+                    note.raw_json,
+                ],
+            )
+            .unwrap();
+        }
+    }
+}
+
 // ── Schema ──────────────────────────────────────────────────────
 
 #[test]
@@ -87,26 +222,21 @@ fn db_creates_tables_and_sets_version() {
     let conn = xbible_engine::db::open(db.path()).expect("open failed");
 
     let v = user_version(&conn);
-    assert!(v >= 1, "expected at least one migration, got {v}");
+    assert!(v >= 10, "expected migrated schema version >= 10, got {v}");
 
     for table in [
-        // v1: catalog
         "translations",
         "commentaries",
         "datasets",
-        // v2: verse content
         "books",
         "verses",
-        // v3: word study
         "lexicon",
         "interlinear_words",
-        // v4: full-fidelity structure
         "book_metadata",
         "chapter_items",
         "footnotes",
         "audio_timings",
         "chapter_raw",
-        // v5: Theographic entity graph
         "people",
         "events",
         "places",
@@ -114,10 +244,8 @@ fn db_creates_tables_and_sets_version() {
         "entity_refs",
         "entity_verse_refs",
         "entity_install_state",
-        // v6: commentary content
         "commentary_books",
         "commentary_chapters",
-        // v7: FTS5 verse index
         "verses_fts",
     ] {
         assert!(table_exists(&conn, table), "missing table {table}");
@@ -128,6 +256,14 @@ fn db_creates_tables_and_sets_version() {
         ("translations", "license_notes"),
         ("translations", "raw_json"),
         ("translations", "selected_canon"),
+        ("translations", "source_id"),
+        ("translations", "language_code"),
+        ("translations", "book_count"),
+        ("translations", "chapter_count"),
+        ("translations", "verse_count"),
+        ("translations", "has_text"),
+        ("translations", "has_audio"),
+        ("translations", "audio_sources_json"),
         ("commentaries", "license_notes"),
         ("commentaries", "raw_json"),
         ("datasets", "license_notes"),
@@ -184,53 +320,113 @@ fn busy_timeout_and_foreign_keys_are_set() {
     drop(conn);
 }
 
-// ── Content round-trip ──────────────────────────────────────────
+// ── Generic models & content round-trip ─────────────────────────
 
 #[test]
-fn chapter_items_survive_insert_and_query() {
-    let db = TempDb::new("chapter_items");
+fn generic_chapter_items_and_spans_round_trip() {
+    let db = TempDb::new("generic_chapter_items");
     let conn = xbible_engine::db::open(db.path()).unwrap();
+    seed_translation(&conn, "BSB", "helloao");
 
-    let insert = "INSERT INTO chapter_items
-        (translation_id, book_id, chapter, position, item_type,
-         verse_number, text, poem, words_of_jesus, footnote_ids, raw_json)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)";
+    let book = GenericBook {
+        translation_id: "BSB".into(),
+        source_id: "helloao".into(),
+        id: "GEN".into(),
+        name: "Genesis".into(),
+        common_name: Some("Genesis".into()),
+        title: Some("The First Book of Moses, Called Genesis".into()),
+        book_order: Some(1),
+        section: CanonicalSection::OldTestament,
+        number_of_chapters: 1,
+        audio_sources: vec![GenericAudioSource {
+            source_ref_id: "main".into(),
+            url: Some("https://example.invalid/gen/1.mp3".into()),
+            format: Some("mp3".into()),
+            is_dramatized: Some(false),
+        }],
+        audio_links_json: Some(r#"{"main":"https://example.invalid/gen/1.mp3"}"#.into()),
+        raw_json: Some(r#"{"id":"GEN"}"#.into()),
+    };
 
-    conn.execute(
-        insert,
-        rusqlite::params![
-            "BSB",
-            "GEN",
-            1,
-            0,
-            "heading",
-            None::<i32>,
-            "The Creation",
-            0,
-            0,
-            None::<String>,
-            "{}"
+    let chapter = GenericChapter {
+        translation_id: "BSB".into(),
+        source_id: "helloao".into(),
+        book_id: "GEN".into(),
+        chapter_number: 1,
+        items: vec![
+            GenericChapterItem {
+                position: 0,
+                item_type: "heading".into(),
+                verse_number: None,
+                text: Some("The Creation".into()),
+                is_poem: false,
+                is_words_of_jesus: false,
+                footnote_ids: Vec::new(),
+                spans: vec![GenericTextSpan {
+                    position: 0,
+                    kind: SpanKind::Text,
+                    text: "The Creation".into(),
+                    formatting: SpanFormatting::default(),
+                    lexical: None,
+                    footnote_ids: Vec::new(),
+                    cross_ref_ids: Vec::new(),
+                    language_code: Some("en".into()),
+                    raw_json: None,
+                }],
+                raw_json: Some(r#"{"type":"heading"}"#.into()),
+            },
+            GenericChapterItem {
+                position: 1,
+                item_type: "verse".into(),
+                verse_number: Some(1),
+                text: Some("In the beginning God created".into()),
+                is_poem: false,
+                is_words_of_jesus: true,
+                footnote_ids: vec!["fn1".into(), "fn2".into()],
+                spans: vec![GenericTextSpan {
+                    position: 0,
+                    kind: SpanKind::Word,
+                    text: "God".into(),
+                    formatting: SpanFormatting {
+                        is_words_of_jesus: true,
+                        ..SpanFormatting::default()
+                    },
+                    lexical: Some(LexicalInfo {
+                        strongs: Some("H430".into()),
+                        lemma: Some("אֱלֹהִים".into()),
+                        transliteration: Some("elohim".into()),
+                        part_of_speech: Some("noun".into()),
+                        morphology: None,
+                        gloss: Some("God".into()),
+                    }),
+                    footnote_ids: vec!["fn1".into()],
+                    cross_ref_ids: Vec::new(),
+                    language_code: Some("hbo".into()),
+                    raw_json: None,
+                }],
+                raw_json: Some(r#"{"type":"verse","number":1}"#.into()),
+            },
         ],
-    )
-    .unwrap();
+        verses: vec![GenericVerse {
+            book_id: "GEN".into(),
+            chapter: 1,
+            verse: 1,
+            text: "In the beginning God created".into(),
+        }],
+        footnotes: vec![GenericFootnote {
+            note_id: "fn1".into(),
+            caller: Some("a".into()),
+            text: Some("Hebrew Elohim".into()),
+            reference: None,
+            raw_json: Some(r#"{"noteId":"fn1"}"#.into()),
+        }],
+        audio_sources: Vec::new(),
+        audio_timings: Vec::new(),
+        raw_json: r#"{"chapter":1}"#.into(),
+    };
 
-    conn.execute(
-        insert,
-        rusqlite::params![
-            "BSB",
-            "GEN",
-            1,
-            1,
-            "verse",
-            Some(1),
-            "In the beginning...",
-            0,
-            1,
-            "fn1,fn2",
-            "{}"
-        ],
-    )
-    .unwrap();
+    assert_eq!(TextDirection::default(), TextDirection::LeftToRight);
+    persist_generic_book_and_chapters(&conn, &book, &[chapter]);
 
     let mut stmt = conn
         .prepare(
@@ -278,69 +474,71 @@ fn chapter_items_survive_insert_and_query() {
 fn fts_index_populates_on_insert_and_clears_on_delete() {
     let db = TempDb::new("fts_sync");
     let conn = xbible_engine::db::open(db.path()).expect("open failed");
+    seed_translation(&conn, "TST", "helloao");
 
-    conn.execute(
-        "INSERT INTO translations
-            (id, name, english_name, short_name, language, text_direction,
-             number_of_books, total_number_of_chapters, total_number_of_verses,
-             installed, has_strongs)
-         VALUES ('TST','Test','Test','TST','eng','ltr',1,2,3,0,0)",
-        [],
-    )
-    .unwrap();
-
-    use xbible_engine::engines::freebible_engine::client::{
-        FreeBibleCompleteBook, FreeBibleCompleteChapter, FreeBibleVerse,
-    };
-
-    let book = FreeBibleCompleteBook {
+    let book = GenericBook {
+        translation_id: "TST".into(),
+        source_id: "helloao".into(),
         id: "GEN".into(),
         name: "Genesis".into(),
-        number_of_chapters: 2,
         common_name: Some("Genesis".into()),
         title: Some("Genesis".into()),
         book_order: Some(1),
+        section: CanonicalSection::OldTestament,
+        number_of_chapters: 2,
+        audio_sources: Vec::new(),
         audio_links_json: None,
-        raw_json: "{}".into(),
-        chapters: vec![
-            FreeBibleCompleteChapter {
-                number: 1,
-                verses: vec![FreeBibleVerse {
-                    number: 1,
-                    text: "In the beginning God created the heavens and the earth.".into(),
-                }],
-                items: vec![],
-                footnotes: vec![],
-                audio_timings: vec![],
-                raw_json: "{}".into(),
-            },
-            FreeBibleCompleteChapter {
-                number: 2,
-                verses: vec![FreeBibleVerse {
-                    number: 1,
-                    text: "Thus the heavens and the earth were completed.".into(),
-                }],
-                items: vec![],
-                footnotes: vec![],
-                audio_timings: vec![],
-                raw_json: "{}".into(),
-            },
-        ],
-        is_apocryphal: false,
+        raw_json: Some("{}".into()),
     };
 
-    xbible_engine::engines::freebible_engine::install::persist_book(&conn, "TST", &book)
-        .expect("persist_book");
+    let chapters = vec![
+        GenericChapter {
+            translation_id: "TST".into(),
+            source_id: "helloao".into(),
+            book_id: "GEN".into(),
+            chapter_number: 1,
+            items: vec![],
+            verses: vec![GenericVerse {
+                book_id: "GEN".into(),
+                chapter: 1,
+                verse: 1,
+                text: "In the beginning God created the heavens and the earth.".into(),
+            }],
+            footnotes: vec![],
+            audio_sources: Vec::new(),
+            audio_timings: Vec::new(),
+            raw_json: "{}".into(),
+        },
+        GenericChapter {
+            translation_id: "TST".into(),
+            source_id: "helloao".into(),
+            book_id: "GEN".into(),
+            chapter_number: 2,
+            items: vec![],
+            verses: vec![GenericVerse {
+                book_id: "GEN".into(),
+                chapter: 2,
+                verse: 1,
+                text: "Thus the heavens and the earth were completed.".into(),
+            }],
+            footnotes: vec![],
+            audio_sources: Vec::new(),
+            audio_timings: Vec::new(),
+            raw_json: "{}".into(),
+        },
+    ];
+
+    persist_generic_book_and_chapters(&conn, &book, &chapters);
 
     let fts_count: i32 = conn
         .query_row("SELECT COUNT(*) FROM verses_fts", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
         fts_count, 2,
-        "verses_fts should have 2 rows after persist_book"
+        "verses_fts should have 2 rows after persisting chapters"
     );
 
-    let result = xbible_engine::engines::freebible_engine::search::search(
+    let result = search(
         &conn,
         "beginning",
         Some("TST"),
@@ -368,7 +566,7 @@ fn fts_index_populates_on_insert_and_clears_on_delete() {
         "verses_fts should have 1 row after deleting one verse"
     );
 
-    let result_after = xbible_engine::engines::freebible_engine::search::search(
+    let result_after = search(
         &conn,
         "completed",
         Some("TST"),
@@ -387,16 +585,7 @@ fn fts_index_populates_on_insert_and_clears_on_delete() {
 fn fts_index_handles_update() {
     let db = TempDb::new("fts_update");
     let conn = xbible_engine::db::open(db.path()).expect("open failed");
-
-    conn.execute(
-        "INSERT INTO translations
-            (id, name, english_name, short_name, language, text_direction,
-             number_of_books, total_number_of_chapters, total_number_of_verses,
-             installed, has_strongs)
-         VALUES ('TST','Test','Test','TST','eng','ltr',1,1,1,0,0)",
-        [],
-    )
-    .unwrap();
+    seed_translation(&conn, "TST", "helloao");
 
     conn.execute(
         "INSERT INTO books (translation_id, id, name, number_of_chapters)
@@ -418,7 +607,7 @@ fn fts_index_handles_update() {
     )
     .unwrap();
 
-    let old = xbible_engine::engines::freebible_engine::search::search(
+    let old = search(
         &conn,
         "original",
         Some("TST"),
@@ -429,7 +618,7 @@ fn fts_index_handles_update() {
     .unwrap();
     assert_eq!(old.total_hits, 0, "old token should be gone after update");
 
-    let new = xbible_engine::engines::freebible_engine::search::search(
+    let new = search(
         &conn,
         "replacement",
         Some("TST"),
@@ -450,22 +639,8 @@ fn fts_index_handles_update() {
 fn search_filter_restricts_to_book() {
     let db = TempDb::new("filter_book");
     let conn = xbible_engine::db::open(db.path()).expect("open failed");
+    seed_translation(&conn, "TST", "helloao");
 
-    // Seed catalog + books + metadata (including section). The
-    // search filter no longer knows about testaments, so book_ids
-    // are what actually constrain the query. Sections are recorded
-    // anyway because `get_books` reads them — and a future test may
-    // check that the section-to-book-ids mapping the UI uses is
-    // consistent with what install wrote.
-    conn.execute(
-        "INSERT INTO translations
-            (id, name, english_name, short_name, language, text_direction,
-             number_of_books, total_number_of_chapters, total_number_of_verses,
-             installed, has_strongs)
-         VALUES ('TST','Test','Test','TST','eng','ltr',2,2,2,0,0)",
-        [],
-    )
-    .unwrap();
     conn.execute(
         "INSERT INTO books (translation_id, id, name, number_of_chapters)
          VALUES ('TST','GEN','Genesis',1), ('TST','PSA','Psalms',1)",
@@ -478,7 +653,6 @@ fn search_filter_restricts_to_book() {
         [],
     )
     .unwrap();
-
     conn.execute(
         "INSERT INTO verses (translation_id, book_id, chapter, verse, text)
          VALUES ('TST','GEN',1,1,'In the beginning God created the heavens.'),
@@ -487,8 +661,7 @@ fn search_filter_restricts_to_book() {
     )
     .unwrap();
 
-    // No filter: both verses returned.
-    let no_filter = xbible_engine::engines::freebible_engine::search::search(
+    let no_filter = search(
         &conn,
         "God",
         Some("TST"),
@@ -499,8 +672,7 @@ fn search_filter_restricts_to_book() {
     .unwrap();
     assert_eq!(no_filter.total_hits, 2);
 
-    // Filter to Psalms only: one verse returned.
-    let psa_only = xbible_engine::engines::freebible_engine::search::search(
+    let psa_only = search(
         &conn,
         "God",
         Some("TST"),
@@ -515,8 +687,7 @@ fn search_filter_restricts_to_book() {
     assert_eq!(psa_only.total_hits, 1);
     assert_eq!(psa_only.hits[0].book_id, "PSA");
 
-    // Filter to an explicit two-book list: both verses.
-    let both = xbible_engine::engines::freebible_engine::search::search(
+    let both = search(
         &conn,
         "God",
         Some("TST"),
@@ -530,8 +701,7 @@ fn search_filter_restricts_to_book() {
     .unwrap();
     assert_eq!(both.total_hits, 2);
 
-    // Filter to a book with no matching verses: zero results.
-    let jhn_only = xbible_engine::engines::freebible_engine::search::search(
+    let jhn_only = search(
         &conn,
         "God",
         Some("TST"),
@@ -552,23 +722,14 @@ fn search_filter_restricts_to_book() {
 fn search_mode_phrase_requires_adjacent_words() {
     let db = TempDb::new("mode_phrase");
     let conn = xbible_engine::db::open(db.path()).expect("open failed");
+    seed_translation(&conn, "TST", "helloao");
 
-    conn.execute(
-        "INSERT INTO translations
-            (id, name, english_name, short_name, language, text_direction,
-             number_of_books, total_number_of_chapters, total_number_of_verses,
-             installed, has_strongs)
-         VALUES ('TST','Test','Test','TST','eng','ltr',1,1,3,0,0)",
-        [],
-    )
-    .unwrap();
     conn.execute(
         "INSERT INTO books (translation_id, id, name, number_of_chapters)
          VALUES ('TST','JHN','John',1)",
         [],
     )
     .unwrap();
-
     conn.execute(
         "INSERT INTO verses (translation_id, book_id, chapter, verse, text)
          VALUES ('TST','JHN',1,1,'love God'),
@@ -578,13 +739,13 @@ fn search_mode_phrase_requires_adjacent_words() {
     )
     .unwrap();
 
-    let multi = xbible_engine::engines::freebible_engine::search::search(
+    let multi = search(
         &conn,
         "love God",
         Some("TST"),
         10,
         SearchFilter {
-            mode: xbible_engine::engines::freebible_engine::search::SearchMode::MultiWord,
+            mode: SearchMode::MultiWord,
             ..SearchFilter::default()
         },
         |_| {},
@@ -592,13 +753,13 @@ fn search_mode_phrase_requires_adjacent_words() {
     .unwrap();
     assert_eq!(multi.total_hits, 3, "multi-word should match all three");
 
-    let phrase = xbible_engine::engines::freebible_engine::search::search(
+    let phrase = search(
         &conn,
         "love God",
         Some("TST"),
         10,
         SearchFilter {
-            mode: xbible_engine::engines::freebible_engine::search::SearchMode::Phrase,
+            mode: SearchMode::Phrase,
             ..SearchFilter::default()
         },
         |_| {},
@@ -612,23 +773,14 @@ fn search_mode_phrase_requires_adjacent_words() {
 fn search_mode_regex_matches_pattern() {
     let db = TempDb::new("mode_regex");
     let conn = xbible_engine::db::open(db.path()).expect("open failed");
+    seed_translation(&conn, "TST", "helloao");
 
-    conn.execute(
-        "INSERT INTO translations
-            (id, name, english_name, short_name, language, text_direction,
-             number_of_books, total_number_of_chapters, total_number_of_verses,
-             installed, has_strongs)
-         VALUES ('TST','Test','Test','TST','eng','ltr',1,1,2,0,0)",
-        [],
-    )
-    .unwrap();
     conn.execute(
         "INSERT INTO books (translation_id, id, name, number_of_chapters)
          VALUES ('TST','PSA','Psalms',1)",
         [],
     )
     .unwrap();
-
     conn.execute(
         "INSERT INTO verses (translation_id, book_id, chapter, verse, text)
          VALUES ('TST','PSA',1,1,'The LORD is my shepherd'),
@@ -637,13 +789,13 @@ fn search_mode_regex_matches_pattern() {
     )
     .unwrap();
 
-    let result = xbible_engine::engines::freebible_engine::search::search(
+    let result = search(
         &conn,
         r"LORD\b",
         Some("TST"),
         10,
         SearchFilter {
-            mode: xbible_engine::engines::freebible_engine::search::SearchMode::Regex,
+            mode: SearchMode::Regex,
             ..SearchFilter::default()
         },
         |_| {},
@@ -652,7 +804,5 @@ fn search_mode_regex_matches_pattern() {
     assert_eq!(result.total_hits, 1, "only verse 1 contains LORD");
     assert_eq!(result.hits[0].verse, 1);
     assert_eq!(result.hits[0].book_id, "PSA");
-
-    // Regex hits carry span highlights now.
     assert!(!result.hits[0].highlights.is_empty());
 }

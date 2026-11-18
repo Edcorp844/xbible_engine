@@ -1,5 +1,5 @@
 //! Unified Store: catalog presentation, categorization, filtering, and
-//! source-routed installation into the general reader format (`src/features/store/store.rs`).
+//! source-routed installation into the general reader format (`src/features/store/store.rs`).[cite: 7]
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -14,6 +14,10 @@ use crate::db::catalog;
 use crate::db::install;
 use crate::db::writer::DbWriter;
 use crate::error::XBibleError;
+use crate::sources::helloao::client::HelloAOClient;
+use crate::sources::helloao::entries::{
+    FetchedEntityDataset, fetch_entity_dataset, persist_entity_dataset,
+};
 use crate::sources::models::GenericInstalledBible;
 use crate::sources::{BibleSource, InstallProgressSink, SourceRegistry};
 
@@ -892,11 +896,55 @@ impl Store {
                     label: item.id.clone(),
                 };
 
+                if matches!(item.kind.as_str(), "entity_set" | "dataset") {
+                    let client = HelloAOClient::new();
+                    let dataset: FetchedEntityDataset =
+                        fetch_entity_dataset(&client, &item.id, &sink)
+                            .map_err(|msg: String| XBibleError::Generic { error_message: msg })?;
+
+                    let total_entities: usize = dataset.entities.len();
+                    let item_id_for_log: String = item.id.clone();
+                    let source_id_for_log: String = source.source_id().to_string();
+                    let tasks_for_write = tasks.clone();
+                    let tid_for_write = tid.clone();
+
+                    writer.submit("persist_entity_dataset", cancel.clone(), move |conn| {
+                        persist_entity_dataset(conn, &dataset, &mut |done, total, label| {
+                            let fraction: f64 = if total > 0 {
+                                0.80 + (done as f64 / total as f64) * 0.19
+                            } else {
+                                0.95
+                            };
+                            update_progress(
+                                &tasks_for_write,
+                                &tid_for_write,
+                                InstallProgress {
+                                    fraction,
+                                    chapters_done: 0,
+                                    chapters_total: 0,
+                                    current_book_name: String::new(),
+                                    current_book_id: String::new(),
+                                    current_chapter: 0,
+                                    current_chapter_verses: 0,
+                                    verses_done: 0,
+                                    message: format!("Writing {label} ({done}/{total})"),
+                                },
+                            );
+                        })?;
+                        Ok(())
+                    })?;
+
+                    info!(
+                        "installed {} from {} ({} entities)",
+                        item_id_for_log, source_id_for_log, total_entities
+                    );
+                    return Ok(());
+                }
+
                 let bundle: GenericInstalledBible = source
                     .install_item(&item, &sink)
                     .map_err(|msg: String| XBibleError::Generic { error_message: msg })?;
 
-                // ── Put the snippet right here (before `begin_install`) ──────────────────
                 let cat = bundle.catalog.clone();
                 let id_for_catalog: String = item.id.clone();
                 writer.submit("ensure_catalog_entry", cancel.clone(), move |conn| {
@@ -938,7 +986,6 @@ impl Store {
                     );
                     Ok(())
                 })?;
-                // ─────────────────────────────────────────────────────────────────────────
 
                 let total_chapters: i32 = bundle
                     .chapters_by_book

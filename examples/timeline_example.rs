@@ -1,8 +1,8 @@
 use log::debug;
 
 fn main() {
-    xbible_engine::init_logging();
-    let data = TimelineData::new().get_data();
+    let engine = xbible_engine::XBibleEngine::new();
+    let data = engine.timeline().get_data();
     for period in data {
         debug!("Period : {}", period.title);
 

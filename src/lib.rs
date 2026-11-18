@@ -23,7 +23,7 @@ use crate::{
     },
     engines::audio_engine::engine::AudioEngine,
     error::XBibleError,
-    features::{reader::XBibleReader, store::Store},
+    features::{reader::XBibleReader, store::Store, timeline::timeline_data::data::TimelineData},
     sources::helloao::HelloAOSource,
 };
 
@@ -116,6 +116,7 @@ pub struct XBibleEngine {
     audio_engine: Arc<AudioEngine>,
     reader: Arc<XBibleReader>,
     store: Arc<Store>,
+    timeline: Arc<TimelineData>,
 }
 
 fn build_store() -> Arc<Store> {
@@ -134,6 +135,7 @@ impl Default for XBibleEngine {
             audio_engine: AudioEngine::new(),
             reader: XBibleReader::new(),
             store: build_store(),
+            timeline: TimelineData::new(),
         }
     }
 }
@@ -151,6 +153,7 @@ impl XBibleEngine {
             audio_engine: AudioEngine::new(),
             reader: XBibleReader::new(),
             store: build_store(),
+            timeline: TimelineData::new(),
         })
     }
 
@@ -207,5 +210,10 @@ impl XBibleEngine {
     /// Returns the store feature handle (`store`).
     pub fn store(&self) -> Arc<Store> {
         self.store.clone()
+    }
+
+    /// Returns the store feature handle (`store`).
+    pub fn timeline(&self) -> Arc<TimelineData> {
+        self.timeline.clone()
     }
 }
