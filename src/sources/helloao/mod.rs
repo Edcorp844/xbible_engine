@@ -33,7 +33,7 @@ use crate::sources::models::{
     GenericBook, GenericBookChapters, GenericCatalogBible, GenericChapter, GenericInstalledBible,
     TextDirection,
 };
-use crate::sources::{BibleSource, InstallProgressSink};
+use crate::sources::{BibleSource, InstallPhase, InstallProgressSink};
 
 const MAX_CONCURRENT_COMMENTARY_FETCHES: usize = 24;
 
@@ -103,7 +103,7 @@ impl HelloAOSource {
 
         let total_entities: usize = dataset.entities.len();
         progress.on_progress(
-            "persist".to_string(),
+            InstallPhase::Install,
             0,
             total_entities as u32,
             Some(format!(
@@ -113,7 +113,7 @@ impl HelloAOSource {
 
         persist_entity_dataset(conn, &dataset, &mut |done, total, label| {
             progress.on_progress(
-                "persist".to_string(),
+                InstallPhase::Install,
                 done as u32,
                 total as u32,
                 Some(format!("Writing {label} ({done}/{total})")),
@@ -121,7 +121,7 @@ impl HelloAOSource {
         })?;
 
         progress.on_progress(
-            "done".to_string(),
+            InstallPhase::Done,
             1,
             1,
             Some(format!("{dataset_id} installed")),
@@ -420,7 +420,7 @@ impl BibleSource for HelloAOSource {
         match item.kind.as_str() {
             "commentary" => {
                 progress.on_progress(
-                    "catalog".to_string(),
+                    InstallPhase::Catalog,
                     0,
                     2,
                     Some(format!("Fetching commentary books for {}", item.id)),
@@ -440,7 +440,7 @@ impl BibleSource for HelloAOSource {
 
                 let total_chapters: u32 = tasks.len() as u32;
                 progress.on_progress(
-                    "download".to_string(),
+                    InstallPhase::Download,
                     0,
                     total_chapters,
                     Some(format!(
@@ -509,7 +509,7 @@ impl BibleSource for HelloAOSource {
                             out.push(pair);
                             let done: u32 = counter_for_loop.fetch_add(1, Ordering::Relaxed) + 1;
                             progress.on_progress(
-                                "download".to_string(),
+                                InstallPhase::Download,
                                 done,
                                 total_chapters,
                                 Some(format!("Downloaded {}/{} chapters", done, total_chapters)),
@@ -529,7 +529,7 @@ impl BibleSource for HelloAOSource {
                 }
 
                 progress.on_progress(
-                    "normalize".to_string(),
+                    InstallPhase::Normalize,
                     1,
                     2,
                     Some("Structuring commentary books and chapters".to_string()),
@@ -551,7 +551,7 @@ impl BibleSource for HelloAOSource {
                     });
                 }
 
-                progress.on_progress("done".to_string(), 2, 2, None);
+                progress.on_progress(InstallPhase::Done, 2, 2, None);
 
                 Ok(GenericInstalledBible {
                     catalog: GenericCatalogBible {
@@ -585,7 +585,7 @@ impl BibleSource for HelloAOSource {
 
                 let total_entities: usize = dataset.entities.len();
                 progress.on_progress(
-                    "persist".to_string(),
+                    InstallPhase::Install,
                     0,
                     total_entities as u32,
                     Some(format!(
@@ -595,7 +595,7 @@ impl BibleSource for HelloAOSource {
                 );
 
                 progress.on_progress(
-                    "done".to_string(),
+                    InstallPhase::Done,
                     1,
                     1,
                     Some(format!("{} fetched ({total_entities} entities)", item.id)),

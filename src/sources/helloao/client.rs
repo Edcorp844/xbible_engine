@@ -32,12 +32,12 @@ use tokio::sync::Semaphore;
 use tokio::task::{JoinError, JoinSet};
 
 use crate::runtime::get_shared_runtime;
-use crate::sources::InstallProgressSink;
 use crate::sources::models::{
     CanonicalSection, GenericAudioSource, GenericAudioTiming, GenericBook, GenericBookChapters,
     GenericCatalogBible, GenericChapter, GenericChapterItem, GenericFootnote,
     GenericInstalledBible, GenericTextSpan, GenericVerse, SpanFormatting, SpanKind, TextDirection,
 };
+use crate::sources::{InstallPhase, InstallProgressSink};
 
 pub const HELLOAO_SOURCE_ID: &str = "helloao";
 pub const HELLOAO_DEFAULT_BASE_URL: &str = "https://bible.helloao.org/api";
@@ -391,7 +391,7 @@ impl HelloAOClient {
         }
 
         progress.on_progress(
-            "catalog".to_string(),
+            InstallPhase::Catalog,
             0,
             3,
             Some(format!("Fetching metadata for {}", translation_id)),
@@ -455,7 +455,7 @@ impl HelloAOClient {
             .collect();
 
         progress.on_progress(
-            "download".to_string(),
+            InstallPhase::Download,
             1,
             3,
             Some("Downloading complete translation archive".to_string()),
@@ -486,7 +486,7 @@ impl HelloAOClient {
                     buf.extend_from_slice(&chunk[..n]);
                     received += n as u64;
                     let current_u32: u32 = u32::try_from(received).unwrap_or(u32::MAX);
-                    progress.on_progress("download".to_string(), current_u32, total_u32, None);
+                    progress.on_progress(InstallPhase::Download, current_u32, total_u32, None);
                 }
 
                 if progress.is_cancelled() {
@@ -522,7 +522,7 @@ impl HelloAOClient {
                                 );
                             } else {
                                 progress.on_progress(
-                                    "normalize".to_string(),
+                                    InstallPhase::Normalize,
                                     2,
                                     3,
                                     Some("Structuring books, chapters, and verses".to_string()),
@@ -535,7 +535,7 @@ impl HelloAOClient {
                                     &apocryphal_by_id,
                                 ) {
                                     Ok(bundle) => {
-                                        progress.on_progress("done".to_string(), 3, 3, None);
+                                        progress.on_progress(InstallPhase::Done, 3, 3, None);
                                         return Ok(bundle);
                                     }
                                     Err(e) => {
@@ -593,7 +593,7 @@ impl HelloAOClient {
         }
 
         progress.on_progress(
-            "download".to_string(),
+            InstallPhase::Download,
             0,
             total_chapters,
             Some(format!(
@@ -663,7 +663,7 @@ impl HelloAOClient {
                             results.push(pair);
                             done = done.saturating_add(1);
                             progress.on_progress(
-                                "download".to_string(),
+                                InstallPhase::Download,
                                 done,
                                 total_chapters,
                                 None,
@@ -674,7 +674,7 @@ impl HelloAOClient {
                             failures.push((book_id, ch_num, err));
                             done = done.saturating_add(1);
                             progress.on_progress(
-                                "download".to_string(),
+                                InstallPhase::Download,
                                 done,
                                 total_chapters,
                                 Some(message),
@@ -731,7 +731,7 @@ impl HelloAOClient {
         }
 
         progress.on_progress(
-            "normalize".to_string(),
+            InstallPhase::Normalize,
             2,
             3,
             Some("Structuring books, chapters, and verses".to_string()),
@@ -767,7 +767,7 @@ impl HelloAOClient {
             total_verses
         );
 
-        progress.on_progress("done".to_string(), 3, 3, None);
+        progress.on_progress(InstallPhase::Done, 3, 3, None);
 
         Ok(GenericInstalledBible {
             catalog: catalog_entry,

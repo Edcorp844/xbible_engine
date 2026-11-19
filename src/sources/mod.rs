@@ -33,16 +33,32 @@ use crate::{
 // ═════════════════════════════════════════════════════════════════════════════
 // 4. Source Contract, Installer & Registry
 // ═════════════════════════════════════════════════════════════════════════════
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum InstallPhase {
+    Catalog,
+    Download,
+    Normalize,
+    Install,
+    Done,
+}
 
 /// Progress and cancellation interface passed to a `BibleSource` during
 /// multi-step download or installation work.
+#[uniffi::export(callback_interface)]
 pub trait InstallProgressSink: Send + Sync {
     /// Reports current progress for a stage (`current` out of `total`).
-    fn on_progress(&self, stage: String, current: u32, total: u32, message: Option<String>);
+    fn on_progress(&self, phase: InstallPhase, current: u32, total: u32, message: Option<String>);
 
     /// Returns true if the caller/store requested cancellation.
     fn is_cancelled(&self) -> bool;
 }
+
+// pub trait InstallProgressSink: Send + Sync {
+//     /// Reports current progress for a stage (`current` out of `total`).
+//     fn on_progress(&self, stage: String, current: u32, total: u32, message: Option<String>);
+
+//     fn is_cancelled(&self) -> bool;
+// }
 
 /// Provider abstraction isolating upstream API differences behind `StoreItem`
 /// presentation records and normalized `Generic*` reader payloads.

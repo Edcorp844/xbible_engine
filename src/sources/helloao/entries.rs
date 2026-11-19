@@ -8,8 +8,8 @@ use tokio::task::{JoinError, JoinSet};
 
 use crate::error::XBibleError;
 use crate::runtime::get_shared_runtime;
-use crate::sources::InstallProgressSink;
 use crate::sources::helloao::client::{HelloAOClient, HelloEntitySummary};
+use crate::sources::{InstallPhase, InstallProgressSink};
 
 const MAX_CONCURRENT_ENTITY_FETCHES: usize = 24;
 
@@ -140,7 +140,7 @@ pub fn fetch_entity_dataset(
     }
 
     progress.on_progress(
-        "catalog".to_string(),
+        InstallPhase::Catalog,
         0,
         4,
         Some(format!("Fetching entity lists for {dataset_id}")),
@@ -180,7 +180,7 @@ pub fn fetch_entity_dataset(
     }
 
     progress.on_progress(
-        "download".to_string(),
+        InstallPhase::Download,
         0,
         total,
         Some(format!("Downloading {total} entities from {dataset_id}")),
@@ -238,7 +238,7 @@ pub fn fetch_entity_dataset(
                 out.push(payload);
                 let done: u32 = counter_for_loop.fetch_add(1, Ordering::Relaxed) + 1;
                 progress.on_progress(
-                    "download".to_string(),
+                    InstallPhase::Download,
                     done,
                     total,
                     Some(format!("Downloaded {done}/{total} entities")),
@@ -257,7 +257,7 @@ pub fn fetch_entity_dataset(
     }
 
     progress.on_progress(
-        "normalize".to_string(),
+        InstallPhase::Normalize,
         0,
         entities.len() as u32,
         Some(format!("Preparing {} entities for install", entities.len())),

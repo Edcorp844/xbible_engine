@@ -19,7 +19,7 @@ use crate::sources::helloao::entries::{
     FetchedEntityDataset, fetch_entity_dataset, persist_entity_dataset,
 };
 use crate::sources::models::GenericInstalledBible;
-use crate::sources::{BibleSource, InstallProgressSink, SourceRegistry};
+use crate::sources::{BibleSource, InstallPhase, InstallProgressSink, SourceRegistry};
 
 // ── UniFFI Wire Records & Task Types ──────────────────────────────────────────
 
@@ -194,33 +194,41 @@ struct StoreProgressBridge {
 }
 
 impl InstallProgressSink for StoreProgressBridge {
-    fn on_progress(&self, stage: String, current: u32, total: u32, message: Option<String>) {
-        let fraction: f64 = match stage.as_str() {
-            "catalog" => 0.05,
-            "download" => {
-                if total > 0 {
-                    0.05 + (current as f64 / total as f64) * 0.70
-                } else {
-                    0.25
-                }
-            }
-            "normalize" => 0.78,
-            "done" => 0.80,
-            _ => 0.10,
+    fn on_progress(&self, phase: InstallPhase, current: u32, total: u32, message: Option<String>) {
+        let ratio: f64 = if total > 0 {
+            (current as f64 / total as f64).clamp(0.0, 1.0)
+        } else {
+            0.0
         };
 
-        let display_message: String = message.unwrap_or_else(|| match stage.as_str() {
-            "download" if total > 0 => {
+        let fraction: f64 = match phase {
+            InstallPhase::Catalog => 0.0,
+            InstallPhase::Download => ratio,
+            InstallPhase::Normalize => ratio,
+            InstallPhase::Install => ratio,
+            InstallPhase::Done => 1.0,
+        };
+
+        let display_message: String = message.unwrap_or_else(|| match phase {
+            InstallPhase::Catalog => format!("Loading {} catalog…", self.label),
+            InstallPhase::Download if total > 0 => {
                 format!("Downloading {} ({}/{})", self.label, current, total)
             }
-            "normalize" => format!("Formatting {}…", self.label),
-            _ => format!("Installing {}…", self.label),
+            InstallPhase::Download => format!("Downloading {}…", self.label),
+            InstallPhase::Normalize if total > 0 => {
+                format!("Normalizing {} ({}/{})", self.label, current, total)
+            }
+            InstallPhase::Normalize => format!("Normalizing {}…", self.label),
+            InstallPhase::Install if total > 0 => {
+                format!("Installing {} ({}/{})", self.label, current, total)
+            }
+            InstallPhase::Install => format!("Installing {}…", self.label),
+            InstallPhase::Done => format!("Done"),
         });
 
-        let (chapters_done, chapters_total) = if stage == "download" {
-            (current as i32, total as i32)
-        } else {
-            (0, 0)
+        let (chapters_done, chapters_total) = match phase {
+            InstallPhase::Download => (current as i32, total as i32),
+            _ => (0, 0),
         };
 
         update_progress(
