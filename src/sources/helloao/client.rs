@@ -4,16 +4,29 @@
 //! (`books.json` `isApocryphal` fallback, `complete.json` streaming download,
 //! bounded concurrent chapter fetching over the shared Tokio runtime, dataset
 //! count fallbacks, and flexible deserializers) live here and map into the
-//! source-agnostic `Generic*` structs consumed by the Store and DB[cite: 6].
+//! source-agnostic `Generic*` structs consumed by the Store and DB.
+//!
+//! Wire types are aligned with the live Free Use Bible API:
+//!   https://bible.helloao.org/api/...
+//!   https://bible.helloao.org/docs/reference/translations/
+//!
+//! Normalization contract (v11+):
+//! - Every chapter item's `content` (string, array-of-strings, array-of-objects,
+//!   nested mixes) is flattened via [`flatten_content`] so `text` AND `spans`
+//!   are populated for poetry, wisdom, prophecy, genealogies, and prose alike.
+//! - Inline markers (`noteId`, `lineBreak`) are skipped and never leak into verse text.
+//! - A shape-mismatched `complete.json` errors out of `normalize_complete_books`
+//!   and falls back to the concurrent per-chapter fetch instead of persisting
+//!   an empty bundle with the `installed = 1` flag set.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::blocking::{Client, Response};
-use serde::de::{DeserializeOwned, IgnoredAny};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 use tokio::sync::Semaphore;
 use tokio::task::{JoinError, JoinSet};
@@ -23,8 +36,7 @@ use crate::sources::InstallProgressSink;
 use crate::sources::models::{
     CanonicalSection, GenericAudioSource, GenericAudioTiming, GenericBook, GenericBookChapters,
     GenericCatalogBible, GenericChapter, GenericChapterItem, GenericFootnote,
-    GenericInstalledBible, GenericTextSpan, GenericVerse, LexicalInfo, SpanFormatting, SpanKind,
-    TextDirection,
+    GenericInstalledBible, GenericTextSpan, GenericVerse, SpanFormatting, SpanKind, TextDirection,
 };
 
 pub const HELLOAO_SOURCE_ID: &str = "helloao";
@@ -255,24 +267,41 @@ impl HelloAOClient {
             "{}/{}/{}.json",
             translation_id, book_id, chapter_number
         ))?;
-        let raw_json: String = serialize_json(&data.chapter);
 
-        let (items, verses, footnotes): (
-            Vec<GenericChapterItem>,
-            Vec<GenericVerse>,
-            Vec<GenericFootnote>,
-        ) = build_chapter_content(book_id, chapter_number, data.chapter.content, Vec::new());
+        let RawChapterPayload {
+            number,
+            content,
+            footnotes,
+            audio_timings,
+        } = data.chapter;
+
+        let effective_chapter: i32 = if number == 0 { chapter_number } else { number };
+
+        let raw_json: String = serialize_json(&RawChapterPayload {
+            number: effective_chapter,
+            content: content.clone(),
+            footnotes: footnotes.clone(),
+            audio_timings: audio_timings.clone(),
+        });
+
+        let mapped_footnotes: Vec<GenericFootnote> =
+            footnotes.into_iter().map(map_footnote).collect();
+        let mapped_timings: Vec<GenericAudioTiming> =
+            audio_timings.into_iter().map(map_audio_timing).collect();
+
+        let (items, verses, chapter_footnotes) =
+            build_chapter_content(book_id, effective_chapter, content, mapped_footnotes);
 
         Ok(GenericChapter {
             translation_id: translation_id.to_string(),
             source_id: HELLOAO_SOURCE_ID.to_string(),
             book_id: book_id.to_string(),
-            chapter_number,
+            chapter_number: effective_chapter,
             items,
             verses,
-            footnotes,
+            footnotes: chapter_footnotes,
             audio_sources: Vec::new(),
-            audio_timings: Vec::new(),
+            audio_timings: mapped_timings,
             raw_json,
         })
     }
@@ -348,9 +377,10 @@ impl HelloAOClient {
         })
     }
 
-    /// Downloads and normalizes a complete HelloAO translation into `GenericInstalledBible`,
-    /// falling back to bounded concurrent per-chapter fetches on the shared Tokio
-    /// runtime when `complete.json` is unavailable.
+    /// Downloads and normalizes a complete HelloAO translation into
+    /// `GenericInstalledBible`, falling back to bounded concurrent
+    /// per-chapter fetches on the shared Tokio runtime when `complete.json`
+    /// is unavailable, truncated, shape-mismatched, or contains no books.
     pub fn fetch_for_install(
         &self,
         translation_id: &str,
@@ -396,15 +426,31 @@ impl HelloAOClient {
             return Err("Installation cancelled".to_string());
         }
 
-        // `books.json` is the authoritative source for `isApocryphal` across books.
+        // `books.json` is the authoritative source for `isApocryphal`.
         let books_list: Vec<GenericBook> = self.list_books(translation_id)?;
+
+        if books_list.is_empty() {
+            return Err(format!(
+                "helloao {}: books.json returned 0 books",
+                translation_id
+            ));
+        }
+
         let apocryphal_by_id: HashMap<String, bool> = books_list
             .iter()
             .map(|b: &GenericBook| {
-                (
-                    b.id.clone(),
-                    matches!(b.section, CanonicalSection::Deuterocanon),
-                )
+                let from_raw: Option<bool> = b
+                    .raw_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                    .and_then(|v| v.get("isApocryphal").and_then(|x| x.as_bool()));
+                let flag: bool = from_raw.unwrap_or(matches!(
+                    b.section,
+                    CanonicalSection::Deuterocanon
+                        | CanonicalSection::OrthodoxExtra
+                        | CanonicalSection::EthiopianExtra
+                ));
+                (b.id.clone(), flag)
             })
             .collect();
 
@@ -447,33 +493,82 @@ impl HelloAOClient {
                     return Err("Installation cancelled before normalization".to_string());
                 }
 
-                progress.on_progress(
-                    "normalize".to_string(),
-                    2,
-                    3,
-                    Some("Structuring books, chapters, and verses".to_string()),
-                );
+                let length_ok: bool = match total {
+                    Some(t) if t > 0 => received == t,
+                    _ => true,
+                };
 
-                let data: CompleteResponse =
-                    serde_json::from_slice(&buf).map_err(|e: serde_json::Error| e.to_string())?;
-                let normalized_bundle: GenericInstalledBible = normalize_complete_books(
-                    translation_id,
-                    catalog_entry,
-                    data.books,
-                    &apocryphal_by_id,
-                );
+                if !length_ok {
+                    log::warn!(
+                        "helloao {}: complete.json truncated ({} / {} bytes); \
+                         falling back to concurrent per-chapter fetch",
+                        translation_id,
+                        received,
+                        total.unwrap_or(0)
+                    );
+                } else {
+                    match serde_json::from_slice::<CompleteResponse>(&buf) {
+                        Ok(data) => {
+                            log::info!(
+                                "helloao {}: complete.json parsed — {} books",
+                                translation_id,
+                                data.books.len()
+                            );
+                            if data.books.is_empty() {
+                                log::warn!(
+                                    "helloao {}: complete.json contained 0 books; \
+                                     falling back to concurrent per-chapter fetch",
+                                    translation_id
+                                );
+                            } else {
+                                progress.on_progress(
+                                    "normalize".to_string(),
+                                    2,
+                                    3,
+                                    Some("Structuring books, chapters, and verses".to_string()),
+                                );
 
-                progress.on_progress("done".to_string(), 3, 3, None);
-                return Ok(normalized_bundle);
+                                match normalize_complete_books(
+                                    translation_id,
+                                    catalog_entry.clone(),
+                                    data.books,
+                                    &apocryphal_by_id,
+                                ) {
+                                    Ok(bundle) => {
+                                        progress.on_progress("done".to_string(), 3, 3, None);
+                                        return Ok(bundle);
+                                    }
+                                    Err(e) => {
+                                        log::warn!(
+                                            "helloao {}: normalize_complete_books failed ({}); \
+                                             falling back to concurrent per-chapter fetch",
+                                            translation_id,
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "helloao {}: complete.json parse failed ({}); \
+                                 falling back to concurrent per-chapter fetch",
+                                translation_id,
+                                e
+                            );
+                        }
+                    }
+                }
             }
         }
 
-        // Fallback: concurrent per-chapter fetch on the shared Tokio runtime.
         self.fetch_for_install_concurrent(translation_id, catalog_entry, books_list, progress)
     }
 
-    /// Fetches all chapters across `books` concurrently with bounded parallelism
-    /// (`MAX_CONCURRENT_CHAPTER_FETCHES`) on the shared Tokio runtime.
+    /// Fetches all chapters across `books` concurrently with bounded
+    /// parallelism. Failed chapter fetches are collected and returned as an
+    /// error — silent skipping is how "missing verses" appeared between
+    /// retries in earlier versions.
     pub fn fetch_for_install_concurrent(
         &self,
         translation_id: &str,
@@ -488,6 +583,13 @@ impl HelloAOClient {
                 tasks.push((book.clone(), ch_num));
                 total_chapters = total_chapters.saturating_add(1);
             }
+        }
+
+        if total_chapters == 0 {
+            return Err(format!(
+                "helloao {}: no chapters to fetch (books.json may be empty)",
+                translation_id
+            ));
         }
 
         progress.on_progress(
@@ -506,71 +608,126 @@ impl HelloAOClient {
         let client_arc: Arc<HelloAOClient> = Arc::new(self.clone());
         let tid_arc: Arc<String> = Arc::new(translation_id.to_string());
 
-        let fetched_pairs: Vec<FetchedChapterPair> = runtime.block_on(async move {
-            let mut join_set: JoinSet<Option<FetchedChapterPair>> = JoinSet::new();
+        let (fetched_pairs, failures): (Vec<FetchedChapterPair>, Vec<(String, i32, String)>) =
+            runtime.block_on(async move {
+                let mut join_set: JoinSet<(
+                    String,
+                    i32,
+                    Option<FetchedChapterPair>,
+                    Option<String>,
+                )> = JoinSet::new();
 
-            for (book, ch_num) in tasks {
-                let permit: tokio::sync::OwnedSemaphorePermit =
-                    match Arc::clone(&semaphore).acquire_owned().await {
-                        Ok(p) => p,
-                        Err(_) => break,
-                    };
-                let client_ref: Arc<HelloAOClient> = Arc::clone(&client_arc);
-                let tid_ref: Arc<String> = Arc::clone(&tid_arc);
-
-                join_set.spawn(async move {
-                    let _permit: tokio::sync::OwnedSemaphorePermit = permit;
+                for (book, ch_num) in tasks {
+                    let permit: tokio::sync::OwnedSemaphorePermit =
+                        match Arc::clone(&semaphore).acquire_owned().await {
+                            Ok(p) => p,
+                            Err(_) => break,
+                        };
+                    let client_ref: Arc<HelloAOClient> = Arc::clone(&client_arc);
+                    let tid_ref: Arc<String> = Arc::clone(&tid_arc);
                     let book_id: String = book.id.clone();
-                    let tid_for_fetch: String = (*tid_ref).clone();
-                    let tid_for_log: String = (*tid_ref).clone();
-                    let book_id_for_log: String = book_id.clone();
 
-                    let res: Result<GenericChapter, String> =
-                        tokio::task::spawn_blocking(move || -> Result<GenericChapter, String> {
-                            client_ref.fetch_chapter(&tid_for_fetch, &book_id, ch_num)
-                        })
+                    join_set.spawn(async move {
+                        let _permit: tokio::sync::OwnedSemaphorePermit = permit;
+                        let tid_for_fetch: String = (*tid_ref).clone();
+                        let book_id_for_fetch: String = book_id.clone();
+
+                        let res: Result<GenericChapter, String> = tokio::task::spawn_blocking(
+                            move || -> Result<GenericChapter, String> {
+                                client_ref.fetch_chapter(&tid_for_fetch, &book_id_for_fetch, ch_num)
+                            },
+                        )
                         .await
                         .unwrap_or_else(|e: JoinError| Err(e.to_string()));
 
-                    match res {
-                        Ok(chapter) => Some(FetchedChapterPair {
-                            book_id: book.id,
-                            chapter,
-                        }),
-                        Err(err) => {
-                            log::warn!(
-                                "helloao {} {} ch {} skipped: {}",
-                                tid_for_log,
-                                book_id_for_log,
-                                ch_num,
-                                err
+                        match res {
+                            Ok(chapter) => {
+                                let pair: FetchedChapterPair = FetchedChapterPair {
+                                    book_id: book_id.clone(),
+                                    chapter,
+                                };
+                                (book_id, ch_num, Some(pair), None)
+                            }
+                            Err(err) => (book_id, ch_num, None, Some(err)),
+                        }
+                    });
+                }
+
+                let mut results: Vec<FetchedChapterPair> = Vec::new();
+                let mut failures: Vec<(String, i32, String)> = Vec::new();
+                let mut done: u32 = 0;
+
+                while let Some(joined) = join_set.join_next().await {
+                    match joined {
+                        Ok((_book_id, _ch_num, Some(pair), _)) => {
+                            results.push(pair);
+                            done = done.saturating_add(1);
+                            progress.on_progress(
+                                "download".to_string(),
+                                done,
+                                total_chapters,
+                                None,
                             );
-                            None
+                        }
+                        Ok((book_id, ch_num, None, Some(err))) => {
+                            let message: String = format!("chapter {} {} failed", book_id, ch_num);
+                            failures.push((book_id, ch_num, err));
+                            done = done.saturating_add(1);
+                            progress.on_progress(
+                                "download".to_string(),
+                                done,
+                                total_chapters,
+                                Some(message),
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(join_err) => {
+                            failures.push((
+                                "?".to_string(),
+                                0,
+                                format!("task join error: {}", join_err),
+                            ));
                         }
                     }
-                });
-            }
-
-            let mut results: Vec<FetchedChapterPair> = Vec::new();
-            let mut done: u32 = 0;
-
-            while let Some(joined) = join_set.join_next().await {
-                if let Ok(Some(pair)) = joined {
-                    results.push(pair);
-                    done = done.saturating_add(1);
-                    progress.on_progress("download".to_string(), done, total_chapters, None);
+                    if progress.is_cancelled() {
+                        join_set.abort_all();
+                        break;
+                    }
                 }
-                if progress.is_cancelled() {
-                    join_set.abort_all();
-                    break;
-                }
-            }
 
-            results
-        });
+                (results, failures)
+            });
 
         if progress.is_cancelled() {
             return Err("Installation cancelled".to_string());
+        }
+
+        if !failures.is_empty() {
+            let sample: String = failures
+                .iter()
+                .take(10)
+                .map(|(b, c, e)| format!("{} {}: {}", b, c, e))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(format!(
+                "{} of {} chapters failed to download ({}). \
+                 Aborting install so it can be retried. First failures: {}",
+                failures.len(),
+                total_chapters,
+                if failures.len() > 10 {
+                    "truncated"
+                } else {
+                    "all shown"
+                },
+                sample
+            ));
+        }
+
+        if fetched_pairs.is_empty() {
+            return Err(format!(
+                "helloao {}: concurrent fetch returned 0 chapters",
+                translation_id
+            ));
         }
 
         progress.on_progress(
@@ -595,6 +752,21 @@ impl HelloAOClient {
             });
         }
 
+        let total_verses: usize = chapters_by_book
+            .iter()
+            .flat_map(|g| g.chapters.iter())
+            .map(|c| c.verses.len())
+            .sum();
+        log::info!(
+            "helloao {}: concurrent fetch normalized {} chapters, {} verses",
+            translation_id,
+            chapters_by_book
+                .iter()
+                .map(|g| g.chapters.len())
+                .sum::<usize>(),
+            total_verses
+        );
+
         progress.on_progress("done".to_string(), 3, 3, None);
 
         Ok(GenericInstalledBible {
@@ -604,7 +776,7 @@ impl HelloAOClient {
         })
     }
 
-    // ── HelloAO Commentaries & Datasets (Source-Local) ────────────────────────
+    // ── Commentaries ──────────────────────────────────────────────────────────
 
     pub fn commentaries(&self) -> Result<Vec<HelloCommentaryMeta>, String> {
         let data: CommentariesResponse = self.get_json("available_commentaries.json")?;
@@ -667,13 +839,34 @@ impl HelloAOClient {
             "c/{}/{}/{}.json",
             commentary_id, book_id, chapter_number
         ))?;
-        let ch_num: i32 = chapter_number as i32;
-        let raw_json: String = serialize_json(&data.chapter);
-        let (items, verses, footnotes): (
-            Vec<GenericChapterItem>,
-            Vec<GenericVerse>,
-            Vec<GenericFootnote>,
-        ) = build_chapter_content(book_id, ch_num, data.chapter.content, Vec::new());
+
+        let RawChapterPayload {
+            number,
+            content,
+            footnotes,
+            audio_timings,
+        } = data.chapter;
+
+        let ch_num: i32 = if number == 0 {
+            chapter_number as i32
+        } else {
+            number
+        };
+
+        let raw_json: String = serialize_json(&RawChapterPayload {
+            number: ch_num,
+            content: content.clone(),
+            footnotes: footnotes.clone(),
+            audio_timings: audio_timings.clone(),
+        });
+
+        let mapped_footnotes: Vec<GenericFootnote> =
+            footnotes.into_iter().map(map_footnote).collect();
+        let mapped_timings: Vec<GenericAudioTiming> =
+            audio_timings.into_iter().map(map_audio_timing).collect();
+
+        let (items, verses, chapter_footnotes) =
+            build_chapter_content(book_id, ch_num, content, mapped_footnotes);
 
         Ok(GenericChapter {
             translation_id: commentary_id.to_string(),
@@ -682,9 +875,9 @@ impl HelloAOClient {
             chapter_number: ch_num,
             items,
             verses,
-            footnotes,
+            footnotes: chapter_footnotes,
             audio_sources: Vec::new(),
-            audio_timings: Vec::new(),
+            audio_timings: mapped_timings,
             raw_json,
         })
     }
@@ -705,6 +898,8 @@ impl HelloAOClient {
     ) -> Result<HelloCommentaryProfile, String> {
         self.get_json(&format!("c/{}/profiles/{}.json", commentary_id, profile_id))
     }
+
+    // ── Datasets ──────────────────────────────────────────────────────────────
 
     pub fn datasets(&self) -> Result<Vec<HelloDatasetMeta>, String> {
         let data: DatasetsResponse = self.get_json("available_datasets.json")?;
@@ -815,21 +1010,11 @@ impl HelloAOClient {
         let sense: Option<RawLexiconSense> = data.entry.senses.into_iter().next();
         Ok(Some(HelloLexiconEntry {
             strongs: data.entry.id,
-            lemma: sense
-                .as_ref()
-                .and_then(|s: &RawLexiconSense| s.lemma.clone()),
-            transliteration: sense
-                .as_ref()
-                .and_then(|s: &RawLexiconSense| s.transliteration.clone()),
-            part_of_speech: sense
-                .as_ref()
-                .and_then(|s: &RawLexiconSense| s.part_of_speech.clone()),
-            gloss: sense
-                .as_ref()
-                .and_then(|s: &RawLexiconSense| s.gloss.clone()),
-            definition: sense
-                .as_ref()
-                .and_then(|s: &RawLexiconSense| s.definition.clone()),
+            lemma: sense.as_ref().and_then(|s| s.lemma.clone()),
+            transliteration: sense.as_ref().and_then(|s| s.transliteration.clone()),
+            part_of_speech: sense.as_ref().and_then(|s| s.part_of_speech.clone()),
+            gloss: sense.as_ref().and_then(|s| s.gloss.clone()),
+            definition: sense.as_ref().and_then(|s| s.definition.clone()),
         }))
     }
 
@@ -840,6 +1025,62 @@ impl HelloAOClient {
             return Err(format!("HTTP {} for {}", resp.status(), url));
         }
         resp.json::<T>().map_err(|e| e.to_string())
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// HelloEntitySummary conversions
+// ═════════════════════════════════════════════════════════════════════════════
+
+impl From<RawPersonSummary> for HelloEntitySummary {
+    fn from(p: RawPersonSummary) -> Self {
+        Self {
+            id: p.id,
+            name: p.name,
+            is_proper_name: p.is_proper_name,
+            gender: p.gender,
+            start_date: None,
+            number_of_references: p.number_of_references.unwrap_or(0),
+        }
+    }
+}
+
+impl From<RawEventSummary> for HelloEntitySummary {
+    fn from(e: RawEventSummary) -> Self {
+        Self {
+            id: e.id,
+            name: e.name,
+            is_proper_name: None,
+            gender: None,
+            start_date: e.start_date,
+            number_of_references: e.number_of_references.unwrap_or(0),
+        }
+    }
+}
+
+impl From<RawPlaceSummary> for HelloEntitySummary {
+    fn from(p: RawPlaceSummary) -> Self {
+        Self {
+            id: p.id,
+            name: p.name,
+            is_proper_name: None,
+            gender: None,
+            start_date: None,
+            number_of_references: p.number_of_references.unwrap_or(0),
+        }
+    }
+}
+
+impl From<RawGroupSummary> for HelloEntitySummary {
+    fn from(g: RawGroupSummary) -> Self {
+        Self {
+            id: g.id,
+            name: g.name,
+            is_proper_name: None,
+            gender: None,
+            start_date: None,
+            number_of_references: g.number_of_references.unwrap_or(0),
+        }
     }
 }
 
@@ -855,14 +1096,50 @@ fn serialize_opt_json<T: Serialize>(val: Option<&T>) -> Option<String> {
     val.and_then(|v| serde_json::to_string(v).ok())
 }
 
+fn json_value_to_string(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        other => Some(other.to_string()),
+    }
+}
+
+fn map_footnote(f: RawFootnote) -> GenericFootnote {
+    let note_id: String = json_value_to_string(&f.note_id).unwrap_or_default();
+    let caller: Option<String> = json_value_to_string(&f.caller);
+    let text: Option<String> = json_value_to_string(&f.text);
+    let reference: Option<String> = json_value_to_string(&f.reference);
+    let note_raw_json: Option<String> = serialize_opt_json(Some(&f));
+
+    GenericFootnote {
+        note_id,
+        caller,
+        text,
+        reference,
+        raw_json: note_raw_json,
+    }
+}
+
+fn map_audio_timing(t: RawAudioTiming) -> GenericAudioTiming {
+    GenericAudioTiming {
+        verse: t.verse.unwrap_or(0),
+        start_ms: t.start_ms,
+        end_ms: t.end_ms,
+    }
+}
+
 fn normalize_complete_books(
     translation_id: &str,
     catalog: GenericCatalogBible,
     raw_books: Vec<RawCompleteBook>,
     apocryphal_by_id: &HashMap<String, bool>,
-) -> GenericInstalledBible {
+) -> Result<GenericInstalledBible, String> {
     let mut books: Vec<GenericBook> = Vec::with_capacity(raw_books.len());
     let mut chapters_by_book: Vec<GenericBookChapters> = Vec::with_capacity(raw_books.len());
+    let mut total_chapters: usize = 0;
+    let mut total_verses: usize = 0;
 
     for b in raw_books {
         let is_apocryphal: bool = apocryphal_by_id
@@ -885,734 +1162,799 @@ fn normalize_complete_books(
             book_order: b.order,
             section,
             number_of_chapters: b.number_of_chapters,
-            audio_sources: book_audio.clone(),
+            audio_sources: book_audio,
             audio_links_json,
             raw_json: book_raw_json,
         });
 
         let mut book_chapters: Vec<GenericChapter> = Vec::with_capacity(b.chapters.len());
         for wrap in b.chapters {
-            let c: RawChapterPayload = wrap.chapter;
-            let chapter_raw_json: String = serialize_json(&c);
-            let footnotes: Vec<GenericFootnote> = c
-                .footnotes
-                .into_iter()
-                .map(|f: RawFootnote| -> GenericFootnote {
-                    let note_raw_json: Option<String> = serialize_opt_json(Some(&f));
-                    GenericFootnote {
-                        note_id: f.note_id,
-                        caller: f.caller,
-                        text: Some(f.text),
-                        reference: f.reference,
-                        raw_json: note_raw_json,
-                    }
-                })
-                .collect();
+            let RawChapterPayload {
+                number,
+                content,
+                footnotes,
+                audio_timings,
+            } = wrap.chapter;
 
-            let audio_timings: Vec<GenericAudioTiming> = c
-                .audio_timings
-                .into_iter()
-                .map(|t: RawAudioTiming| -> GenericAudioTiming {
-                    GenericAudioTiming {
-                        verse: t.verse.unwrap_or(0),
-                        start_ms: t.start_ms,
-                        end_ms: t.end_ms,
-                    }
-                })
-                .collect();
+            let chapter_number: i32 = if number == 0 { 0 } else { number };
+            let chapter_raw_json: String = serialize_json(&RawChapterPayload {
+                number: chapter_number,
+                content: content.clone(),
+                footnotes: footnotes.clone(),
+                audio_timings: audio_timings.clone(),
+            });
 
-            let (items, verses, chapter_footnotes): (
-                Vec<GenericChapterItem>,
-                Vec<GenericVerse>,
-                Vec<GenericFootnote>,
-            ) = build_chapter_content(&b.id, c.number, c.content, footnotes);
+            let mapped_footnotes: Vec<GenericFootnote> =
+                footnotes.into_iter().map(map_footnote).collect();
+            let mapped_timings: Vec<GenericAudioTiming> =
+                audio_timings.into_iter().map(map_audio_timing).collect();
+
+            let (items, verses, chapter_footnotes) =
+                build_chapter_content(&b.id, chapter_number, content, mapped_footnotes);
+
+            total_chapters += 1;
+            total_verses += verses.len();
 
             book_chapters.push(GenericChapter {
                 translation_id: translation_id.to_string(),
                 source_id: HELLOAO_SOURCE_ID.to_string(),
                 book_id: b.id.clone(),
-                chapter_number: c.number,
+                chapter_number,
                 items,
                 verses,
                 footnotes: chapter_footnotes,
-                audio_sources: book_audio.clone(),
-                audio_timings,
+                audio_sources: Vec::new(),
+                audio_timings: mapped_timings,
                 raw_json: chapter_raw_json,
             });
         }
 
+        book_chapters.sort_by_key(|c: &GenericChapter| c.chapter_number);
         chapters_by_book.push(GenericBookChapters {
             book_id: b.id,
             chapters: book_chapters,
         });
     }
 
-    GenericInstalledBible {
+    if books.is_empty() || total_chapters == 0 {
+        return Err(format!(
+            "normalize_complete_books produced {} books / {} chapters for {} — \
+             complete.json was likely malformed",
+            books.len(),
+            total_chapters,
+            translation_id
+        ));
+    }
+
+    log::info!(
+        "helloao {}: complete.json normalized {} books, {} chapters, {} verses",
+        translation_id,
+        books.len(),
+        total_chapters,
+        total_verses
+    );
+
+    Ok(GenericInstalledBible {
         catalog,
         books,
         chapters_by_book,
-    }
+    })
 }
 
-fn parse_text_direction(dir: Option<&str>) -> TextDirection {
-    match dir.map(|s: &str| s.to_ascii_lowercase()).as_deref() {
-        Some("rtl") | Some("right-to-left") | Some("right_to_left") => TextDirection::RightToLeft,
+fn parse_text_direction(raw: Option<&str>) -> TextDirection {
+    match raw {
+        Some("rtl") | Some("RTL") | Some("right-to-left") | Some("right_to_left") => {
+            TextDirection::RightToLeft
+        }
         _ => TextDirection::LeftToRight,
     }
 }
 
 fn parse_translation_audio_sources(raw: &serde_json::Value) -> Vec<GenericAudioSource> {
-    raw.get("availableFormats")
-        .and_then(|v: &serde_json::Value| v.as_array())
-        .map(|arr: &Vec<serde_json::Value>| -> Vec<GenericAudioSource> {
-            arr.iter()
-                .filter_map(|v: &serde_json::Value| v.as_str())
-                .filter(|s: &&str| {
-                    let lower: String = s.to_ascii_lowercase();
-                    lower.contains("audio") || lower.ends_with("mp3") || lower.ends_with("opus")
-                })
-                .map(|fmt: &str| -> GenericAudioSource {
-                    GenericAudioSource {
-                        source_ref_id: fmt.to_string(),
-                        url: None,
-                        format: Some(fmt.to_string()),
-                        is_dramatized: None,
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    let mut out: Vec<GenericAudioSource> = Vec::new();
+    let audio_val: Option<&serde_json::Value> = raw.get("audio");
+
+    let push = |obj: &serde_json::Value, out: &mut Vec<GenericAudioSource>| {
+        let id: String = obj
+            .get("id")
+            .or_else(|| obj.get("filesetId"))
+            .or_else(|| obj.get("fileset_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if id.is_empty() {
+            return;
+        }
+        out.push(GenericAudioSource {
+            source_ref_id: id,
+            url: obj.get("url").and_then(|v| v.as_str()).map(String::from),
+            format: obj.get("format").and_then(|v| v.as_str()).map(String::from),
+            is_dramatized: obj.get("isDramatized").and_then(|v| v.as_bool()),
+        });
+    };
+
+    if let Some(v) = audio_val {
+        match v {
+            serde_json::Value::Array(arr) => {
+                for item in arr {
+                    push(item, &mut out);
+                }
+            }
+            serde_json::Value::Object(_) => push(v, &mut out),
+            _ => {}
+        }
+    }
+
+    out
 }
 
 fn parse_audio_sources(audio_links: Option<&serde_json::Value>) -> Vec<GenericAudioSource> {
-    let Some(val) = audio_links else {
+    let Some(v) = audio_links else {
         return Vec::new();
     };
-    match val {
-        serde_json::Value::Object(map) => map
-            .iter()
-            .filter_map(|(k, v): (&String, &serde_json::Value)| {
-                v.as_str().map(|url: &str| GenericAudioSource {
-                    source_ref_id: k.clone(),
-                    url: Some(url.to_string()),
-                    format: None,
-                    is_dramatized: None,
-                })
-            })
-            .collect(),
-        serde_json::Value::Array(arr) => arr
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, v): (usize, &serde_json::Value)| {
-                v.as_str().map(|url: &str| GenericAudioSource {
-                    source_ref_id: format!("track_{}", idx),
-                    url: Some(url.to_string()),
-                    format: None,
-                    is_dramatized: None,
-                })
-            })
-            .collect(),
-        _ => Vec::new(),
+    let mut out: Vec<GenericAudioSource> = Vec::new();
+
+    let push = |obj: &serde_json::Value, out: &mut Vec<GenericAudioSource>| {
+        let id: String = obj
+            .get("id")
+            .or_else(|| obj.get("filesetId"))
+            .or_else(|| obj.get("fileset_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if id.is_empty() {
+            return;
+        }
+        out.push(GenericAudioSource {
+            source_ref_id: id,
+            url: obj.get("url").and_then(|v| v.as_str()).map(String::from),
+            format: obj.get("format").and_then(|v| v.as_str()).map(String::from),
+            is_dramatized: obj.get("isDramatized").and_then(|v| v.as_bool()),
+        });
+    };
+
+    match v {
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                push(item, &mut out);
+            }
+        }
+        serde_json::Value::Object(_) => push(v, &mut out),
+        _ => {}
     }
+
+    out
 }
 
 fn infer_section(book_id: &str, is_apocryphal: bool) -> CanonicalSection {
-    if is_apocryphal {
-        return CanonicalSection::Deuterocanon;
-    }
-    match book_id.to_ascii_uppercase().as_str() {
-        "GEN" | "EXO" | "LEV" | "NUM" | "DEU" | "JOS" | "JDG" | "RUT" | "1SA" | "2SA" | "1KI"
-        | "2KI" | "1CH" | "2CH" | "EZR" | "NEH" | "EST" | "JOB" | "PSA" | "PRO" | "ECC" | "SNG"
-        | "ISA" | "JER" | "LAM" | "EZK" | "DAN" | "HOS" | "JOL" | "AMO" | "OBA" | "JON" | "MIC"
-        | "NAM" | "HAB" | "ZEP" | "HAG" | "ZEC" | "MAL" => CanonicalSection::OldTestament,
-        "MAT" | "MRK" | "LUK" | "JHN" | "ACT" | "ROM" | "1CO" | "2CO" | "GAL" | "EPH" | "PHP"
-        | "COL" | "1TH" | "2TH" | "1TI" | "2TI" | "TIT" | "PHM" | "HEB" | "JAS" | "1PE" | "2PE"
-        | "1JN" | "2JN" | "3JN" | "JUD" | "REV" => CanonicalSection::NewTestament,
-        _ => CanonicalSection::Unknown,
-    }
-}
+    let id: String = book_id.to_uppercase();
 
-fn append_piece(text: &mut String, piece: &str) {
-    if piece.is_empty() {
-        return;
+    const ETHIOPIAN_EXTRA: &[&str] = &["ENO", "JUB", "1MQ", "2MQ", "3MQ", "4BA"];
+    const ORTHODOX_EXTRA: &[&str] = &["3MA", "4MA", "DAG", "ADE"];
+
+    if ETHIOPIAN_EXTRA.contains(&id.as_str()) {
+        return CanonicalSection::EthiopianExtra;
     }
-    if !text.is_empty() {
-        let need_space: bool = !text.ends_with([' ', '\n', '\t', '\u{00A0}'])
-            && !piece.starts_with([' ', '\n', '\t', '\u{00A0}']);
-        if need_space {
-            text.push(' ');
+    if ORTHODOX_EXTRA.contains(&id.as_str()) {
+        return CanonicalSection::OrthodoxExtra;
+    }
+
+    if !is_apocryphal {
+        const NT: &[&str] = &[
+            "MAT", "MRK", "LUK", "JHN", "ACT", "ROM", "1CO", "2CO", "GAL", "EPH", "PHP", "COL",
+            "1TH", "2TH", "1TI", "2TI", "TIT", "PHM", "HEB", "JAS", "1PE", "2PE", "1JN", "2JN",
+            "3JN", "JUD", "REV",
+        ];
+        if NT.contains(&id.as_str()) {
+            return CanonicalSection::NewTestament;
         }
+        return CanonicalSection::OldTestament;
     }
-    text.push_str(piece);
+
+    CanonicalSection::Deuterocanon
 }
 
-fn pieces_to_spans_and_text(
-    pieces: &[RawVersePiece],
-) -> (Vec<GenericTextSpan>, String, bool, bool, Vec<String>) {
-    let mut spans: Vec<GenericTextSpan> = Vec::new();
-    let mut merged_text: String = String::new();
-    let mut is_poem: bool = false;
-    let mut is_words_of_jesus: bool = false;
-    let mut footnote_ids: Vec<String> = Vec::new();
-    let mut pos: i32 = 0;
+// ═════════════════════════════════════════════════════════════════════════════
+// Chapter content normalization
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// HelloAO encodes chapter `content` items in several shapes:
+//
+//   1. Plain string:           "content": "In the beginning..."
+//   2. Array of strings:       "content": ["line one", "line two"]
+//   3. Array of line objects:  "content": [{"text": "...", "poem": 1}, ...]
+//   4. Nested mixes + markers: {"noteId": 0}, {"lineBreak": true, "paragraph": "p"}
+//
+// Inline markers must be skipped so they never leak digits / noise into verse text.
 
-    for piece in pieces {
-        let piece_raw_json: Option<String> = serialize_opt_json(Some(piece));
-        match piece {
-            RawVersePiece::Text(t) => {
+struct ExtractedPiece {
+    text: String,
+    is_poetry: bool,
+    is_words_of_jesus: bool,
+}
+
+/// Recursively walk any `serde_json::Value` and collect visible text pieces.
+fn collect_pieces(value: &serde_json::Value, out: &mut Vec<ExtractedPiece>) {
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+        serde_json::Value::String(s) => {
+            if !s.is_empty() {
+                out.push(ExtractedPiece {
+                    text: s.clone(),
+                    is_poetry: false,
+                    is_words_of_jesus: false,
+                });
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                collect_pieces(item, out);
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            // Skip pure inline markers — they carry navigation / footnote refs, not prose.
+            if obj.contains_key("noteId")
+                || obj.contains_key("note_id")
+                || obj.contains_key("lineBreak")
+                || obj.contains_key("line_break")
+            {
+                return;
+            }
+
+            let is_poetry: bool = obj.get("poem").map(|v| !v.is_null()).unwrap_or(false);
+            let is_words_of_jesus: bool = obj
+                .get("wordsOfJesus")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                || obj
+                    .get("words_of_jesus")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+            if let Some(t) = obj.get("text").and_then(|v| v.as_str()) {
                 if !t.is_empty() {
-                    append_piece(&mut merged_text, t);
-                    spans.push(GenericTextSpan {
-                        position: pos,
-                        kind: SpanKind::Text,
-                        text: t.clone(),
-                        formatting: SpanFormatting::default(),
-                        lexical: None,
-                        footnote_ids: Vec::new(),
-                        cross_ref_ids: Vec::new(),
-                        language_code: None,
-                        raw_json: piece_raw_json,
+                    out.push(ExtractedPiece {
+                        text: t.to_string(),
+                        is_poetry,
+                        is_words_of_jesus,
                     });
-                    pos += 1;
                 }
             }
-            RawVersePiece::Formatted(f) => {
-                is_poem |= f.poem;
-                is_words_of_jesus |= f.words_of_jesus;
-                if !f.text.is_empty() {
-                    append_piece(&mut merged_text, &f.text);
-                    let lexical: Option<LexicalInfo> =
-                        f.strong.as_ref().map(|s: &String| LexicalInfo {
-                            strongs: Some(s.clone()),
-                            ..LexicalInfo::default()
-                        });
-                    let kind: SpanKind = if lexical.is_some() {
-                        SpanKind::Word
-                    } else if f.words_of_jesus {
-                        SpanKind::Quote
-                    } else {
-                        SpanKind::Text
-                    };
-                    spans.push(GenericTextSpan {
-                        position: pos,
-                        kind,
-                        text: f.text.clone(),
-                        formatting: SpanFormatting {
-                            is_words_of_jesus: f.words_of_jesus,
-                            is_poetry: f.poem,
-                            ..SpanFormatting::default()
-                        },
-                        lexical,
-                        footnote_ids: Vec::new(),
-                        cross_ref_ids: Vec::new(),
-                        language_code: None,
-                        raw_json: piece_raw_json,
-                    });
-                    pos += 1;
-                }
+
+            if let Some(nested) = obj.get("content") {
+                collect_pieces(nested, out);
             }
-            RawVersePiece::Footnote(note) => {
-                if let Some(id) = &note.note_id {
-                    footnote_ids.push(id.clone());
-                    spans.push(GenericTextSpan {
-                        position: pos,
-                        kind: SpanKind::FootnoteRef,
-                        text: note.caller.clone().unwrap_or_default(),
-                        formatting: SpanFormatting::default(),
-                        lexical: None,
-                        footnote_ids: vec![id.clone()],
-                        cross_ref_ids: Vec::new(),
-                        language_code: None,
-                        raw_json: piece_raw_json,
-                    });
-                    pos += 1;
-                }
+            if let Some(spans) = obj.get("spans") {
+                collect_pieces(spans, out);
             }
-            RawVersePiece::Other(_) => {}
+        }
+    }
+}
+
+/// Flatten a raw chapter item's `content` into `(text, spans, is_poem, is_words_of_jesus)`.
+fn flatten_content(
+    content: &serde_json::Value,
+    base_position: i32,
+) -> (String, Vec<GenericTextSpan>, bool, bool) {
+    let mut pieces: Vec<ExtractedPiece> = Vec::new();
+    collect_pieces(content, &mut pieces);
+
+    if pieces.is_empty() {
+        return (String::new(), Vec::new(), false, false);
+    }
+
+    let mut joined: String = String::new();
+    let mut spans: Vec<GenericTextSpan> = Vec::with_capacity(pieces.len());
+    let mut any_poetry: bool = false;
+    let mut any_words_of_jesus: bool = false;
+
+    for (idx, piece) in pieces.into_iter().enumerate() {
+        if !joined.is_empty() {
+            joined.push(' ');
+        }
+        joined.push_str(&piece.text);
+
+        if piece.is_poetry {
+            any_poetry = true;
+        }
+        if piece.is_words_of_jesus {
+            any_words_of_jesus = true;
+        }
+
+        spans.push(GenericTextSpan {
+            position: base_position + idx as i32,
+            kind: SpanKind::Text,
+            text: piece.text,
+            formatting: SpanFormatting {
+                is_words_of_jesus: piece.is_words_of_jesus,
+                is_poetry: piece.is_poetry,
+                ..Default::default()
+            },
+            lexical: None,
+            footnote_ids: Vec::new(),
+            cross_ref_ids: Vec::new(),
+            language_code: None,
+            raw_json: None,
+        });
+    }
+
+    (joined, spans, any_poetry, any_words_of_jesus)
+}
+
+fn raw_verse_number(item: &serde_json::Value) -> Option<i32> {
+    item.get("number")
+        .and_then(|v| v.as_i64())
+        .map(|n| n as i32)
+        .or_else(|| item.get("verse").and_then(|v| v.as_i64()).map(|n| n as i32))
+}
+
+fn raw_item_type(item: &serde_json::Value, has_number: bool) -> String {
+    if let Some(t) = item.get("type").and_then(|v| v.as_str()) {
+        return t.to_string();
+    }
+    if has_number {
+        "verse".to_string()
+    } else {
+        "text".to_string()
+    }
+}
+
+fn raw_footnote_ids(item: &serde_json::Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+
+    if let Some(arr) = item.get("footnotes").and_then(|v| v.as_array()) {
+        for f in arr {
+            match f {
+                serde_json::Value::String(s) => out.push(s.clone()),
+                serde_json::Value::Object(o) => {
+                    if let Some(id) = o.get("noteId").and_then(|v| v.as_i64()) {
+                        out.push(id.to_string());
+                    } else if let Some(id) = o.get("noteId").and_then(|v| v.as_str()) {
+                        out.push(id.to_string());
+                    } else if let Some(id) = o.get("id").and_then(|v| v.as_str()) {
+                        out.push(id.to_string());
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
-    (spans, merged_text, is_poem, is_words_of_jesus, footnote_ids)
+    // Inline `{"noteId": N}` markers inside content also reference footnotes.
+    if let Some(arr) = item.get("content").and_then(|v| v.as_array()) {
+        for c in arr {
+            if let Some(id) = c.get("noteId").and_then(|v| v.as_i64()) {
+                out.push(id.to_string());
+            } else if let Some(id) = c.get("noteId").and_then(|v| v.as_str()) {
+                out.push(id.to_string());
+            }
+        }
+    }
+
+    out
 }
 
+/// Build normalized chapter content (items + verses + merged footnotes).
 fn build_chapter_content(
     book_id: &str,
     chapter_number: i32,
-    raw_items: Vec<RawChapterItem>,
-    footnotes: Vec<GenericFootnote>,
+    raw_content: Vec<serde_json::Value>,
+    mut footnotes: Vec<GenericFootnote>,
 ) -> (
     Vec<GenericChapterItem>,
     Vec<GenericVerse>,
     Vec<GenericFootnote>,
 ) {
-    let mut items: Vec<GenericChapterItem> = Vec::with_capacity(raw_items.len());
-    let mut verses: Vec<GenericVerse> = Vec::new();
+    let mut items: Vec<GenericChapterItem> = Vec::with_capacity(raw_content.len());
+    let mut verse_map: BTreeMap<i32, String> = BTreeMap::new();
+    let mut item_position: i32 = 0;
 
-    for (idx, raw) in raw_items.into_iter().enumerate() {
-        let position: i32 = idx as i32;
+    for raw in raw_content {
+        let verse_number: Option<i32> = raw_verse_number(&raw);
+        let item_type: String = raw_item_type(&raw, verse_number.is_some());
+
+        let content_value: &serde_json::Value =
+            raw.get("content").unwrap_or(&serde_json::Value::Null);
+
+        let (joined_text, spans, is_poetry, is_words_of_jesus) = flatten_content(content_value, 0);
+
+        let footnote_ids: Vec<String> = raw_footnote_ids(&raw);
+
+        let text_field: Option<String> = if joined_text.is_empty() {
+            None
+        } else {
+            Some(joined_text.clone())
+        };
+
         let item_raw_json: Option<String> = serialize_opt_json(Some(&raw));
-        match raw {
-            RawChapterItem::Verse { number, content } => {
-                let (spans, text, is_poem, is_words_of_jesus, footnote_ids): (
-                    Vec<GenericTextSpan>,
-                    String,
-                    bool,
-                    bool,
-                    Vec<String>,
-                ) = pieces_to_spans_and_text(&content);
-                verses.push(GenericVerse {
-                    book_id: book_id.to_string(),
-                    chapter: chapter_number,
-                    verse: number,
-                    text: text.clone(),
-                });
-                items.push(GenericChapterItem {
-                    position,
-                    item_type: "verse".to_string(),
-                    verse_number: Some(number),
-                    text: Some(text),
-                    is_poem,
-                    is_words_of_jesus,
-                    footnote_ids,
-                    spans,
-                    raw_json: item_raw_json,
-                });
-            }
-            RawChapterItem::Heading { content } => {
-                let (spans, text, is_poem, is_words_of_jesus, footnote_ids): (
-                    Vec<GenericTextSpan>,
-                    String,
-                    bool,
-                    bool,
-                    Vec<String>,
-                ) = pieces_to_spans_and_text(&content);
-                items.push(GenericChapterItem {
-                    position,
-                    item_type: "heading".to_string(),
-                    verse_number: None,
-                    text: Some(text),
-                    is_poem,
-                    is_words_of_jesus,
-                    footnote_ids,
-                    spans,
-                    raw_json: item_raw_json,
-                });
-            }
-            RawChapterItem::HebrewSubtitle { content } => {
-                let (spans, text, is_poem, is_words_of_jesus, footnote_ids): (
-                    Vec<GenericTextSpan>,
-                    String,
-                    bool,
-                    bool,
-                    Vec<String>,
-                ) = pieces_to_spans_and_text(&content);
-                items.push(GenericChapterItem {
-                    position,
-                    item_type: "hebrew_subtitle".to_string(),
-                    verse_number: None,
-                    text: Some(text),
-                    is_poem,
-                    is_words_of_jesus,
-                    footnote_ids,
-                    spans,
-                    raw_json: item_raw_json,
-                });
-            }
-            RawChapterItem::LineBreak => {
-                items.push(GenericChapterItem {
-                    position,
-                    item_type: "line_break".to_string(),
-                    verse_number: None,
-                    text: None,
-                    is_poem: false,
-                    is_words_of_jesus: false,
-                    footnote_ids: Vec::new(),
-                    spans: Vec::new(),
-                    raw_json: item_raw_json,
-                });
-            }
-            RawChapterItem::Unknown => {
-                items.push(GenericChapterItem {
-                    position,
-                    item_type: "unknown".to_string(),
-                    verse_number: None,
-                    text: None,
-                    is_poem: false,
-                    is_words_of_jesus: false,
-                    footnote_ids: Vec::new(),
-                    spans: Vec::new(),
-                    raw_json: item_raw_json,
-                });
-            }
+
+        items.push(GenericChapterItem {
+            position: item_position,
+            item_type,
+            verse_number,
+            text: text_field,
+            is_poem: is_poetry,
+            is_words_of_jesus,
+            footnote_ids,
+            spans,
+            raw_json: item_raw_json,
+        });
+        item_position += 1;
+
+        if let (Some(vnum), false) = (verse_number, joined_text.is_empty()) {
+            verse_map
+                .entry(vnum)
+                .and_modify(|existing: &mut String| {
+                    if !existing.is_empty() {
+                        existing.push(' ');
+                    }
+                    existing.push_str(&joined_text);
+                })
+                .or_insert(joined_text);
         }
     }
+
+    let verses: Vec<GenericVerse> = verse_map
+        .into_iter()
+        .map(|(verse, text)| GenericVerse {
+            book_id: book_id.to_string(),
+            chapter: chapter_number,
+            verse,
+            text,
+        })
+        .collect();
+
+    let mut seen: HashSet<String> = HashSet::new();
+    footnotes.retain(|f: &GenericFootnote| seen.insert(f.note_id.clone()));
 
     (items, verses, footnotes)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Flexible Deserializers & Raw HelloAO Wire Structs (Private to Source)
+// Raw Wire Types (serde) — aligned with bible.helloao.org
 // ═════════════════════════════════════════════════════════════════════════════
+//
+// All camelCase field names from the live API are renamed explicitly.
+// Optional extras (sha256, availableFormats, license object, audio links, …)
+// are captured via `#[serde(flatten)] raw` where useful.
 
-fn de_string_from_any<'de, D>(d: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let v: serde_json::Value = Deserialize::deserialize(d)?;
-    Ok(match v {
-        serde_json::Value::String(s) => s,
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Null => String::new(),
-        other => other.to_string(),
-    })
-}
-
-fn de_opt_string<'de, D>(d: D) -> Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let v: serde_json::Value = Deserialize::deserialize(d)?;
-    Ok(match v {
-        serde_json::Value::String(s) => Some(s),
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        serde_json::Value::Bool(b) => Some(b.to_string()),
-        serde_json::Value::Null => None,
-        other => Some(other.to_string()),
-    })
-}
-
-fn de_opt_i32<'de, D>(d: D) -> Result<Option<i32>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let v: serde_json::Value = Deserialize::deserialize(d)?;
-    Ok(match v {
-        serde_json::Value::Number(n) => n.as_i64().map(|x: i64| x as i32),
-        serde_json::Value::String(s) => s.parse::<i32>().ok(),
-        _ => None,
-    })
-}
-
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct TranslationsResponse {
     translations: Vec<RawTranslation>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct RawTranslation {
     id: String,
     name: String,
-    #[serde(rename = "englishName")]
+    #[serde(default, rename = "englishName")]
     english_name: String,
-    #[serde(rename = "shortName")]
+    #[serde(default, rename = "shortName")]
     short_name: String,
+    #[serde(default)]
     language: String,
-    #[serde(rename = "languageName")]
+    #[serde(default, rename = "languageName")]
     language_name: Option<String>,
-    #[serde(rename = "languageEnglishName")]
+    #[serde(default, rename = "languageEnglishName")]
     language_english_name: Option<String>,
-    #[serde(rename = "textDirection")]
+    #[serde(default, rename = "textDirection")]
     text_direction: Option<String>,
-    #[serde(rename = "numberOfBooks", default)]
+    #[serde(default, rename = "numberOfBooks")]
     number_of_books: i32,
-    #[serde(rename = "totalNumberOfChapters", default)]
+    #[serde(default, rename = "totalNumberOfChapters")]
     total_number_of_chapters: i32,
-    #[serde(rename = "totalNumberOfVerses", default)]
+    #[serde(default, rename = "totalNumberOfVerses")]
     total_number_of_verses: i32,
-    #[serde(rename = "licenseUrl")]
+    #[serde(default, rename = "licenseUrl")]
     license_url: Option<String>,
-    #[serde(rename = "licenseNotes")]
+    #[serde(default, rename = "licenseNotes")]
     license_notes: Option<String>,
+    /// Catch-all: website, license object, sha256, availableFormats, audio, links, …
     #[serde(flatten)]
     raw: serde_json::Value,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct BooksResponse {
+    #[serde(default)]
+    translation: Option<RawTranslation>,
     books: Vec<RawBook>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct RawBook {
     id: String,
+    #[serde(default, rename = "translationId")]
+    translation_id: Option<String>,
     name: String,
-    #[serde(rename = "numberOfChapters", default)]
-    number_of_chapters: i32,
-    #[serde(rename = "commonName")]
+    #[serde(default, rename = "commonName")]
     common_name: Option<String>,
+    #[serde(default, rename = "shortName")]
+    short_name: Option<String>,
+    #[serde(default)]
     title: Option<String>,
-    #[serde(default, deserialize_with = "de_opt_i32")]
+    #[serde(default)]
     order: Option<i32>,
-    #[serde(rename = "audioLinks")]
-    audio_links: Option<serde_json::Value>,
-    #[serde(rename = "isApocryphal", default)]
+    #[serde(default, rename = "numberOfChapters")]
+    number_of_chapters: i32,
+    #[serde(default, rename = "firstChapterNumber")]
+    first_chapter_number: Option<i32>,
+    #[serde(default, rename = "lastChapterNumber")]
+    last_chapter_number: Option<i32>,
+    #[serde(default, rename = "totalNumberOfVerses")]
+    total_number_of_verses: Option<i32>,
+    /// Omitted on pure Protestant canons; present on deuterocanonical books.
+    #[serde(default, rename = "isApocryphal")]
     is_apocryphal: Option<bool>,
+    #[serde(default, rename = "audioLinks")]
+    audio_links: Option<serde_json::Value>,
+    #[serde(default)]
+    sha256: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ChapterResponse {
     chapter: RawChapterPayload,
+    #[serde(default, rename = "thisChapterAudioLinks")]
+    this_chapter_audio_links: Option<serde_json::Value>,
+    #[serde(default, rename = "thisChapterAudioTimings")]
+    this_chapter_audio_timings: Option<serde_json::Value>,
 }
 
-#[derive(Deserialize)]
-struct SimpleChapterResponse {
-    chapter: RawSimpleChapterPayload,
-}
-
-#[derive(Deserialize, Serialize)]
-struct RawSimpleChapterPayload {
-    content: Vec<FlexibleSimpleItem>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(untagged)]
-enum FlexibleSimpleItem {
-    Verse {
-        #[serde(default, deserialize_with = "de_opt_i32")]
-        number: Option<i32>,
-        #[serde(default, deserialize_with = "de_string_from_any")]
-        text: String,
-    },
-    Other(#[serde(skip_serializing)] IgnoredAny),
-}
-
-#[derive(Deserialize)]
-struct CompleteResponse {
-    books: Vec<RawCompleteBook>,
-}
-
-#[derive(Deserialize, Serialize)]
-struct RawCompleteBook {
-    id: String,
-    name: String,
-    #[serde(rename = "numberOfChapters", default)]
-    number_of_chapters: i32,
-    #[serde(rename = "commonName")]
-    common_name: Option<String>,
-    title: Option<String>,
-    #[serde(default, deserialize_with = "de_opt_i32")]
-    order: Option<i32>,
-    #[serde(rename = "audioLinks")]
-    audio_links: Option<serde_json::Value>,
-    #[serde(rename = "isApocryphal", default)]
-    is_apocryphal: Option<bool>,
-    #[serde(default)]
-    chapters: Vec<RawCompleteChapterWrapper>,
-}
-
-#[derive(Deserialize, Serialize)]
-struct RawCompleteChapterWrapper {
-    chapter: RawChapterPayload,
-}
-
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct RawChapterPayload {
     #[serde(default)]
     number: i32,
-    #[serde(default)]
-    content: Vec<RawChapterItem>,
+    /// Heterogeneous: heading | line_break | verse | hebrew_subtitle + nested text.
+    content: Vec<serde_json::Value>,
     #[serde(default)]
     footnotes: Vec<RawFootnote>,
-    #[serde(rename = "audioTimings", default)]
+    #[serde(default, rename = "audioTimings")]
     audio_timings: Vec<RawAudioTiming>,
 }
 
-#[derive(Deserialize, Serialize)]
+/// Footnote records use integer `noteId`; accept int or string via Value.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct RawFootnote {
-    #[serde(rename = "noteId", default, deserialize_with = "de_string_from_any")]
-    note_id: String,
-    #[serde(default, deserialize_with = "de_opt_string")]
-    caller: Option<String>,
-    #[serde(default, deserialize_with = "de_string_from_any")]
-    text: String,
-    #[serde(default, deserialize_with = "de_opt_string")]
-    reference: Option<String>,
+    #[serde(default, rename = "noteId", alias = "id")]
+    note_id: serde_json::Value,
+    #[serde(default)]
+    caller: serde_json::Value,
+    #[serde(default)]
+    text: serde_json::Value,
+    #[serde(default)]
+    reference: serde_json::Value,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct RawAudioTiming {
-    #[serde(default, deserialize_with = "de_opt_i32")]
+    #[serde(default)]
     verse: Option<i32>,
-    #[serde(rename = "startMs", default)]
+    #[serde(default, rename = "startMs")]
     start_ms: Option<i64>,
-    #[serde(rename = "endMs", default)]
+    #[serde(default, rename = "endMs")]
     end_ms: Option<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type")]
-enum RawChapterItem {
-    #[serde(rename = "verse")]
-    Verse {
-        #[serde(default)]
-        number: i32,
-        #[serde(default)]
-        content: Vec<RawVersePiece>,
-    },
-    #[serde(rename = "heading")]
-    Heading {
-        #[serde(default)]
-        content: Vec<RawVersePiece>,
-    },
-    #[serde(rename = "hebrew_subtitle")]
-    HebrewSubtitle {
-        #[serde(default)]
-        content: Vec<RawVersePiece>,
-    },
-    #[serde(rename = "line_break")]
-    LineBreak,
-    #[serde(other)]
-    Unknown,
+#[derive(Debug, Deserialize)]
+struct SimpleChapterResponse {
+    chapter: RawSimpleChapter,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
+struct RawSimpleChapter {
+    #[serde(default)]
+    content: Vec<FlexibleSimpleItem>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
-enum RawVersePiece {
-    Text(String),
-    Formatted(RawFormattedText),
-    Footnote(RawInlineFootnote),
+enum FlexibleSimpleItem {
+    Verse {
+        #[serde(default)]
+        number: Option<i32>,
+        #[serde(default)]
+        text: String,
+    },
     Other(serde_json::Value),
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct RawFormattedText {
-    #[serde(default, deserialize_with = "de_string_from_any")]
-    text: String,
+/// `/api/{translation}/complete.json`
+#[derive(Debug, Deserialize)]
+struct CompleteResponse {
     #[serde(default)]
-    poem: bool,
-    #[serde(rename = "wordsOfJesus", default)]
-    words_of_jesus: bool,
-    #[serde(default, deserialize_with = "de_opt_string")]
-    strong: Option<String>,
+    translation: Option<RawTranslation>,
+    books: Vec<RawCompleteBook>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct RawInlineFootnote {
-    #[serde(rename = "noteId", default, deserialize_with = "de_opt_string")]
-    note_id: Option<String>,
-    #[serde(default, deserialize_with = "de_opt_string")]
-    caller: Option<String>,
+struct RawCompleteBook {
+    id: String,
+    name: String,
+    #[serde(default, rename = "commonName")]
+    common_name: Option<String>,
+    #[serde(default, rename = "shortName")]
+    short_name: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    order: Option<i32>,
+    #[serde(default, rename = "numberOfChapters")]
+    number_of_chapters: i32,
+    #[serde(default, rename = "totalNumberOfVerses")]
+    total_number_of_verses: Option<i32>,
+    #[serde(default, rename = "isApocryphal")]
+    is_apocryphal: Option<bool>,
+    #[serde(default, rename = "audioLinks")]
+    audio_links: Option<serde_json::Value>,
+    #[serde(default)]
+    chapters: Vec<RawCompleteChapterWrap>,
 }
 
-#[derive(Deserialize)]
+/// Each entry in `books[].chapters[]` from complete.json:
+/// `{ "numberOfVerses": N, "thisChapterAudioLinks": {...}, "chapter": {...} }`
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct RawCompleteChapterWrap {
+    #[serde(default, rename = "numberOfVerses")]
+    number_of_verses: Option<i32>,
+    #[serde(default, rename = "thisChapterAudioLinks")]
+    this_chapter_audio_links: Option<serde_json::Value>,
+    #[serde(default, rename = "thisChapterAudioTimings")]
+    this_chapter_audio_timings: Option<serde_json::Value>,
+    chapter: RawChapterPayload,
+}
+
+// ── Commentaries ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
 struct CommentariesResponse {
+    #[serde(default)]
     commentaries: Vec<RawCommentary>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct RawCommentary {
     id: String,
     name: String,
-    #[serde(rename = "englishName", default)]
+    #[serde(default, rename = "englishName")]
     english_name: String,
     #[serde(default)]
     language: String,
-    #[serde(rename = "licenseUrl")]
+    #[serde(default, rename = "licenseUrl")]
     license_url: Option<String>,
-    #[serde(rename = "licenseNotes")]
+    #[serde(default, rename = "licenseNotes")]
     license_notes: Option<String>,
-    #[serde(rename = "numberOfBooks", default)]
+    #[serde(default, rename = "numberOfBooks")]
     number_of_books: i32,
-    #[serde(rename = "totalNumberOfChapters", default)]
+    #[serde(default, rename = "totalNumberOfChapters")]
     total_number_of_chapters: i32,
-    #[serde(rename = "totalNumberOfVerses", default)]
+    #[serde(default, rename = "totalNumberOfVerses")]
     total_number_of_verses: i32,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ProfilesResponse {
+    #[serde(default)]
     profiles: Vec<HelloCommentaryProfile>,
 }
 
-#[derive(Deserialize)]
+// ── Datasets ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
 struct DatasetsResponse {
+    #[serde(default)]
     datasets: Vec<RawDataset>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct RawDataset {
     id: String,
     name: String,
-    #[serde(rename = "englishName")]
+    #[serde(default, rename = "englishName")]
     english_name: Option<String>,
+    #[serde(default)]
     language: Option<String>,
-    #[serde(rename = "licenseUrl")]
+    #[serde(default, rename = "licenseUrl")]
     license_url: Option<String>,
-    #[serde(rename = "licenseNotes")]
+    #[serde(default, rename = "licenseNotes")]
     license_notes: Option<String>,
-    #[serde(rename = "totalNumberOfBooks")]
+    #[serde(default, rename = "totalNumberOfBooks")]
     total_number_of_books: Option<i32>,
-    #[serde(rename = "totalNumberOfWords")]
+    #[serde(default, rename = "totalNumberOfWords")]
     total_number_of_words: Option<i32>,
-    #[serde(rename = "totalNumberOfLexicon")]
+    #[serde(default, rename = "totalNumberOfLexicon")]
     total_number_of_lexicon: Option<i32>,
 }
 
-#[derive(Deserialize)]
-struct RawEntityItem {
-    id: String,
-    name: String,
-    #[serde(rename = "isProperName")]
-    is_proper_name: Option<bool>,
-    gender: Option<String>,
-    #[serde(rename = "startDate", default, deserialize_with = "de_opt_string")]
-    start_date: Option<String>,
-    #[serde(rename = "numberOfReferences", default)]
-    number_of_references: i32,
-}
-
-impl From<RawEntityItem> for HelloEntitySummary {
-    fn from(r: RawEntityItem) -> Self {
-        Self {
-            id: r.id,
-            name: r.name,
-            is_proper_name: r.is_proper_name,
-            gender: r.gender,
-            start_date: r.start_date,
-            number_of_references: r.number_of_references,
-        }
-    }
-}
-
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct PeopleListResponse {
-    people: Vec<RawEntityItem>,
+    #[serde(default)]
+    people: Vec<RawPersonSummary>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct EventsListResponse {
-    events: Vec<RawEntityItem>,
+    #[serde(default)]
+    events: Vec<RawEventSummary>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct PlacesListResponse {
-    places: Vec<RawEntityItem>,
+    #[serde(default)]
+    places: Vec<RawPlaceSummary>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct GroupsListResponse {
-    groups: Vec<RawEntityItem>,
+    #[serde(default)]
+    groups: Vec<RawGroupSummary>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
+struct RawPersonSummary {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default, rename = "isProperName")]
+    is_proper_name: Option<bool>,
+    #[serde(default)]
+    gender: Option<String>,
+    #[serde(default, rename = "numberOfReferences")]
+    number_of_references: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawEventSummary {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default, rename = "startDate")]
+    start_date: Option<String>,
+    #[serde(default, rename = "numberOfReferences")]
+    number_of_references: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPlaceSummary {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default, rename = "numberOfReferences")]
+    number_of_references: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawGroupSummary {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default, rename = "numberOfReferences")]
+    number_of_references: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
 struct LexiconEntryResponse {
     entry: RawLexiconEntry,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct RawLexiconEntry {
+    #[serde(default)]
     id: String,
     #[serde(default)]
     senses: Vec<RawLexiconSense>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct RawLexiconSense {
+    #[serde(default)]
     lemma: Option<String>,
+    #[serde(default)]
     transliteration: Option<String>,
-    #[serde(rename = "partOfSpeech")]
+    #[serde(default, rename = "partOfSpeech")]
     part_of_speech: Option<String>,
+    #[serde(default)]
     gloss: Option<String>,
+    #[serde(default)]
     definition: Option<String>,
 }

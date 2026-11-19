@@ -403,6 +403,27 @@ const MIGRATIONS: &[M<'_>] = &[
             ON translations (source_id);
         "#,
     ),
+    // ── v11: structured span payload for chapter items ───────────
+    //
+    // `chapter_items.text` is the flattened plain text used for fast
+    // verse reconstruction and FTS. `spans_json` preserves the full
+    // `Vec<GenericTextSpan>` (kind, formatting, lexical info, per-span
+    // positions) so a reader can render red-letter, poetry indentation,
+    // Strong's tooltips, and footnote/cross-ref anchors without
+    // re-parsing `raw_json`. Nullable: legacy rows and pure layout
+    // items (line breaks, empty headings) legitimately have no spans.
+    M::up(
+        r#"
+        ALTER TABLE chapter_items ADD COLUMN spans_json TEXT;
+
+        -- Partial index: only rows that actually carry spans. Speeds up
+        -- "which items in this chapter have lexical/formatting data"
+        -- queries without deserializing every JSON blob.
+        CREATE INDEX IF NOT EXISTS idx_chapter_items_has_spans
+            ON chapter_items (translation_id, book_id, chapter)
+            WHERE spans_json IS NOT NULL;
+        "#,
+    ),
 ];
 
 /// Apply every pending migration to `conn`, bringing it to
@@ -489,6 +510,7 @@ mod tests {
             ("datasets", "license_notes"),
             ("datasets", "raw_json"),
             ("book_metadata", "section"),
+            ("chapter_items", "spans_json"),
         ] {
             let has: i32 = conn
                 .query_row(
