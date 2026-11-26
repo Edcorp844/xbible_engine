@@ -8,3 +8,8 @@
 /windows
 /local_module_cache
 .DS_Store
+
+# Local runtime database (created by migrations; never commit)
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
