@@ -1,0 +1,50 @@
+name: Sprint Child Issue Creator
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  create-child-issues:
+    if: contains(github.event.issue.title, 'SPRINT -')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read # needed for actions/checkout, so the parser script can be required from the repo
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Create Child Issues
+        uses: actions/github-script@v9
+        with:
+          script: |
+            // Pure parsing logic lives in a real, unit-tested module (see
+            // .github/scripts/sprint-child-creator.js and
+            // test/sprint-child-creator.test.js) rather than inline here, so
+            // it isn't only verified by hand whenever it changes.
+            const { parseFeatures, buildChildBody } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/sprint-child-creator.js`);
+
+            const issue = context.payload.issue;
+            const body = issue.body || "";
+            const parentNumber = issue.number;
+
+            const features = parseFeatures(body);
+            if (features.length === 0) return;
+
+            const bodyContent = buildChildBody(parentNumber);
+
+            for (const title of features) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body: bodyContent,
+                labels: ['sprint-child']
+              });
+            }

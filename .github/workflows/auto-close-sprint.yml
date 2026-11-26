@@ -1,0 +1,178 @@
+name: Update Sprint Progress + Intelligence + Auto Close
+
+on:
+  issues:
+    # reopened: bringing a child back lowers the burn-down and, if the sprint
+    # had closed itself, reopens it.
+    types: [closed, reopened]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  update-sprint:
+    # Only a sprint child carries a "Parent Sprint: #N" line (the script's own
+    # test); skipping here means closing an ordinary issue bills no minute.
+    if: contains(github.event.issue.body, 'Parent Sprint:')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read # needed for actions/checkout, so the burn-down script can be required from the repo
+    # Serialize runs: closing several child issues in quick succession triggers
+    # concurrent runs that each read-modify-write the same sprint issue body,
+    # which can race and drop an update (or double-fire the 100% auto-close).
+    concurrency:
+      group: auto-close-sprint-${{ github.repository }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Update sprint health, burn-down, and auto-close
+        uses: actions/github-script@v9
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        with:
+          script: |
+            // Pure burn-down/health logic lives in a real, unit-tested module
+            // (see .github/scripts/auto-close-sprint.js and
+            // test/auto-close-sprint.test.js) rather than inline here, so
+            // it isn't only verified by hand whenever it changes.
+            const {
+              parseParentSprintNumber,
+              isSprintChild,
+              AUTO_CLOSE_COMMENT,
+              wasAutoClosed,
+              parseSprintDates,
+              computeTimePercent,
+              computeProgress,
+              computeHealthEmoji,
+              renderBurnDown,
+              updateSprintBody,
+            } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/auto-close-sprint.js`);
+
+            const issue = context.payload.issue;
+            const body = issue.body || "";
+
+            const sprintNumber = parseParentSprintNumber(body);
+            if (!sprintNumber) return;
+
+            const sprintIssue = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: sprintNumber
+            });
+
+            const sprintBody = sprintIssue.data.body || "";
+
+            // Unreadable dates are treated like a broken range (time 100%, so
+            // health flags it) rather than skipping the run, so the burn-down,
+            // auto-close and reopen still work.
+            const dates = parseSprintDates(sprintBody);
+            if (!dates) console.log("Sprint dates not found; treating time as fully elapsed.");
+            const timePercent = dates ? computeTimePercent(dates.startDate, dates.endDate, new Date()) : 100;
+
+            // Paginate: a plain listForRepo call caps at one page (100 issues) and
+            // would silently undercount children in repos with more open+closed
+            // issues than that, skewing the burn-down.
+            //
+            // Deliberately NOT scoped to labels: "sprint-active" (an earlier
+            // version of this workflow did that, for cost — cheaper in repos
+            // with a lot of unrelated issue history). That's wrong: a child
+            // issue relabeled away from sprint-active during triage (e.g. to
+            // "bug") while still open would silently drop out of BOTH the
+            // numerator and denominator of the progress calculation instead
+            // of just being excluded from the closed count — the sprint could
+            // report inflated progress, or even reach a false 100% and
+            // auto-close, while that untracked child is still open. Matches
+            // docs/governance.md's documented trigger ("body has Parent
+            // Sprint"), which is body-content-based, not label-based.
+            const allIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "all",
+              per_page: 100
+            });
+
+            // Exact-number match (not a substring): "Parent Sprint: #57" is not
+            // a child of sprint #5. Pull requests never count.
+            const children = allIssues.filter(i => isSprintChild(i, sprintNumber));
+
+            const { progressPercent } = computeProgress(children);
+            const healthEmoji = computeHealthEmoji(progressPercent, timePercent);
+            const burnDown = renderBurnDown(progressPercent);
+            const updatedBody = updateSprintBody(sprintBody, { progressPercent, timePercent, healthEmoji, burnDown });
+
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: sprintNumber,
+              body: updatedBody
+            });
+
+            const sprintClosed = sprintIssue.data.state === "closed";
+
+            // A child came back: if the sprint had closed itself, it isn't
+            // finished any more. A sprint somebody closed by hand is left alone.
+            if (context.payload.action === "reopened") {
+              if (sprintClosed && progressPercent < 100) {
+                const sprintComments = await github.paginate(github.rest.issues.listComments, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: sprintNumber,
+                  per_page: 100
+                });
+                if (wasAutoClosed(sprintComments, sprintIssue.data.closed_at)) {
+                  await github.rest.issues.update({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: sprintNumber,
+                    state: "open"
+                  });
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: sprintNumber,
+                    body: `♻️ Sprint reopened: #${issue.number} was reopened, so the sprint is at ${progressPercent}% again.`
+                  });
+                }
+              }
+              return;
+            }
+
+            // Close the sprint once, when the last child closes (not again for
+            // a later child closing on a sprint that is already closed).
+            if (progressPercent === 100 && !sprintClosed) {
+
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: sprintNumber,
+                state: "closed"
+              });
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: sprintNumber,
+                body: AUTO_CLOSE_COMMENT
+              });
+
+              if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
+                await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    chat_id: process.env.TELEGRAM_CHAT_ID,
+                    text:
+                      `🚀 Sprint Completed!\n\n` +
+                      `${sprintIssue.data.title}\n\n` +
+                      `Progress: 100%\n` +
+                      `Repository: ${context.repo.repo}`
+                  })
+                });
+              }
+            }
