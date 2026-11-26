@@ -2,6 +2,11 @@
 name = "xbible_engine"
 version = "0.1.0"
 edition = "2024"
+description = "Offline-first Bible engine with UniFFI bindings for Swift, Kotlin and other languages"
+license = "GPL-3.0-only"
+repository = "https://github.com/Edcorp844/xbible_engine"
+readme = "README.md"
+keywords = ["bible", "uniffi", "sqlite", "offline", "ffi"]
 
 [dependencies]
 directories = "5.0"
